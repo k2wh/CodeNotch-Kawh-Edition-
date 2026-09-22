@@ -21,6 +21,24 @@ export interface Release {
 
 export const CHANGELOG: Release[] = [
   {
+    version: "0.2.2",
+    date: "2026-09-22",
+    changes: {
+      en: [
+        "The Claude ring works for people who only have the Claude desktop app: where Claude Code never signed in, it reads the app's own record of the plan — the same 5-hour and weekly windows — instead of showing nothing.",
+        "If that app isn't running, its last reading is marked stale rather than passed off as current, and the 5-hour window drops once it is old enough to have rolled over.",
+      ],
+      pt: [
+        "O anel do Claude passa a funcionar para quem só tem o app do Claude no computador: onde o Claude Code nunca entrou, ele lê o registro que o próprio app guarda do plano, com as mesmas janelas de 5 horas e de semana, em vez de não mostrar nada.",
+        "Se esse app não estiver aberto, a última leitura dele aparece marcada como desatualizada, e a janela de 5 horas some quando já é velha o bastante para ter virado.",
+      ],
+      es: [
+        "El anillo de Claude ya funciona para quien solo tiene la app de Claude: donde Claude Code nunca inició sesión, lee el registro que la propia app guarda del plan, con las mismas ventanas de 5 horas y de semana, en lugar de no mostrar nada.",
+        "Si esa app no está abierta, su última lectura se marca como desactualizada, y la ventana de 5 horas desaparece cuando ya es vieja como para haber cambiado.",
+      ],
+    },
+  },
+  {
     version: "0.2.1",
     date: "2026-09-22",
     changes: {

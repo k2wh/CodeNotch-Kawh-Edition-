@@ -151,7 +151,7 @@ under `%APPDATA%` on Windows, `~/.config` on Linux and
 
 | Provider | Source | What you get |
 | --- | --- | --- |
-| **Claude Code** | `GET /api/oauth/usage` with the token from `~/.claude/.credentials.json`, Windows Credential Manager or the macOS keychain; falls back to session transcripts under `~/.claude/projects/`. Extra accounts in `~/.claude-<name>` | Real 5-hour and weekly utilisation, the weekly limit per model, reset times, plan, per-project sessions, and whether a session is parked on a permission prompt |
+| **Claude Code** | `GET /api/oauth/usage` with the token from `~/.claude/.credentials.json`, Windows Credential Manager or the macOS keychain; falls back to session transcripts under `~/.claude/projects/`, and, where Claude Code never signed in, to the Claude desktop app's own `plan-usage-history.json`. Extra accounts in `~/.claude-<name>` | Real 5-hour and weekly utilisation, the weekly limit per model, reset times, plan, per-project sessions, and whether a session is parked on a permission prompt |
 | **Cursor** | Cursor's `User/globalStorage/state.vscdb` and per-workspace databases in its app data, read without locking them | Plan, account, any cached request counters, live composer sessions per project |
 | **Codex** | Rollout transcripts under `~/.codex/sessions/` (plus `~/.codex-<profile>`) | The rate-limit snapshot Codex records from the API, token totals, pending tool approvals |
 | **GitHub Copilot** | Cached quota payloads in `github-copilot` under the local app data (`%LOCALAPPDATA%` on Windows), `~/.config/github-copilot/` and `~/.copilot/` | Plan, signed-in user, chat/completions/premium quota and reset date |

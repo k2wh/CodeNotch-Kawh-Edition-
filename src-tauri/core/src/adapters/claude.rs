@@ -9,6 +9,12 @@
 //! back to the local session transcripts under `%USERPROFILE%\.claude\projects\`.
 //! Those give token counts and, importantly, the live activity state: whether an
 //! agent is generating, finished, or parked on a `[y/N]` approval prompt.
+//!
+//! And when there is no Claude Code at all — someone who only has the Claude
+//! desktop app — the app's own record of the plan stands in: it samples the
+//! same two windows every quarter of an hour into `plan-usage-history.json`
+//! beside its settings. Those are real readings, taken by the app for itself;
+//! nothing of the app's session is read or used to ask for them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +44,16 @@ const GENERATING_WITHIN_SECS: i64 = 25;
 const DONE_WITHIN_MINS: i64 = 10;
 /// Only the newest transcripts matter; scanning every project is wasteful.
 const MAX_TRANSCRIPTS: usize = 12;
+
+/// The desktop app writes a sample every quarter of an hour while it runs, so
+/// anything younger than this is as current as that file ever gets.
+const APP_SAMPLE_FRESH_MINS: i64 = 30;
+/// Past this the five-hour window may have rolled over without the app running
+/// to see it, and a number that might be from the window before is worse than
+/// none: only the week, which is still a floor, carries on.
+const APP_SAMPLE_SESSION_MAX_MINS: i64 = 2 * 60;
+/// Past this, even the week says too little about today to show.
+const APP_SAMPLE_MAX_MINS: i64 = 12 * 60;
 /// Tail window per transcript. Enough for the last few exchanges.
 const TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
 
@@ -689,6 +705,82 @@ impl ClaudePaths {
     }
 }
 
+/// What the Claude desktop app has seen of the plan.
+///
+/// The app keeps its own history of the two windows — `fh` for the five-hour
+/// one, `sd` for the week — sampled every quarter of an hour while it is
+/// running. For someone who has the app and not Claude Code, this is the only
+/// reading of their limits on the machine, and it is the app's own: no session
+/// of theirs is borrowed to produce it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppReading {
+    pub taken_at: DateTime<Utc>,
+    pub five_hour_pct: Option<f32>,
+    pub seven_day_pct: Option<f32>,
+}
+
+/// Where the desktop app keeps that file: `%APPDATA%\Claude` on Windows,
+/// `~/Library/Application Support/Claude` on a Mac.
+pub fn app_usage_file() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("Claude").join("plan-usage-history.json"))
+}
+
+/// The newest sample in the app's history, whatever its age.
+pub fn parse_app_usage(raw: &str) -> Option<AppReading> {
+    let root: Json = serde_json::from_str(raw).ok()?;
+    let samples = root.get("samples")?.as_array()?;
+    let newest = samples
+        .iter()
+        .filter(|sample| sample.get("t").and_then(Json::as_i64).is_some())
+        .max_by_key(|sample| sample.get("t").and_then(Json::as_i64).unwrap_or(0))?;
+
+    let taken_at = DateTime::from_timestamp_millis(newest.get("t")?.as_i64()?)?;
+    let pct = |field: &str| {
+        newest
+            .get("u")
+            .and_then(|usage| usage.get(field))
+            .and_then(Json::as_f64)
+            .map(|value| value.clamp(0.0, 100.0) as f32)
+    };
+    Some(AppReading {
+        taken_at,
+        five_hour_pct: pct("fh"),
+        seven_day_pct: pct("sd"),
+    })
+}
+
+/// The app's reading as windows, dropping what has gone too stale to mean
+/// anything. `None` when nothing is left worth drawing.
+fn app_windows(reading: AppReading, now: DateTime<Utc>) -> Option<(Vec<UsageWindow>, i64)> {
+    let age = now.signed_duration_since(reading.taken_at).num_minutes();
+    // A sample from the future is a clock that disagrees, not a reading; a
+    // little ahead is fine, hours ahead is not.
+    if !(-APP_SAMPLE_FRESH_MINS..=APP_SAMPLE_MAX_MINS).contains(&age) {
+        return None;
+    }
+
+    let mut windows = Vec::new();
+    if age <= APP_SAMPLE_SESSION_MAX_MINS {
+        if let Some(pct) = reading.five_hour_pct {
+            windows.push(
+                UsageWindow::new("five_hour", "5h session")
+                    .with_pct(pct)
+                    .lasting(5 * 60)
+                    .weekly(false),
+            );
+        }
+    }
+    if let Some(pct) = reading.seven_day_pct {
+        windows.push(
+            UsageWindow::new("seven_day", "7d all models")
+                .with_pct(pct)
+                .lasting(7 * 24 * 60)
+                .weekly(true),
+        );
+    }
+    (!windows.is_empty()).then_some((windows, age.max(0)))
+}
+
 /// Every Claude Code account signed in on this machine.
 ///
 /// Claude Code keeps one account per config directory, and switching between
@@ -775,6 +867,10 @@ pub struct ClaudeAdapter {
     /// reads it: it would show the default account's usage under its own name,
     /// and ask the endpoint for it twice.
     shared_store: bool,
+    /// The desktop app's own record of the plan, which stands in when there is
+    /// no Claude Code login here. It belongs to whichever account the app is
+    /// signed into, so like Credential Manager it is the default account's.
+    app_usage: Option<PathBuf>,
 }
 
 impl ClaudeAdapter {
@@ -787,6 +883,7 @@ impl ClaudeAdapter {
             rejected_token: None,
             backoff_health: Health::RateLimited,
             shared_store: true,
+            app_usage: app_usage_file(),
         }
     }
 
@@ -817,7 +914,15 @@ impl ClaudeAdapter {
             rejected_token: None,
             backoff_health: Health::RateLimited,
             shared_store: true,
+            app_usage: app_usage_file(),
         }
+    }
+
+    /// Read the desktop app's history from here rather than from where it
+    /// lives, for tests.
+    pub fn with_app_usage(mut self, path: Option<PathBuf>) -> Self {
+        self.app_usage = path;
+        self
     }
 
     /// Find credentials: the file first, then Credential Manager.
@@ -986,12 +1091,42 @@ impl ClaudeAdapter {
             .estimated()]
     }
 
+    /// What the desktop app last saw of the plan, if it is worth showing.
+    ///
+    /// Only for the account the app is signed into, which is the default one —
+    /// the same reason an extra account never reads Credential Manager.
+    fn app_reading(&self, now: DateTime<Utc>) -> Option<(Vec<UsageWindow>, i64)> {
+        if !self.shared_store {
+            return None;
+        }
+        let raw = std::fs::read_to_string(self.app_usage.as_ref()?).ok()?;
+        app_windows(parse_app_usage(&raw)?, now)
+    }
+
     /// Build the snapshot for this poll.
     pub async fn collect(&mut self, now: DateTime<Utc>) -> ProviderSnapshot {
         let installed = self.paths.as_ref().is_some_and(|p| p.exists());
         let sessions = self.scan_sessions(now);
 
         let Some(creds) = self.credentials() else {
+            // Nothing signed in here, but the desktop app may be: it keeps its
+            // own reading of the same two windows, which is exactly what
+            // someone who has the app and not Claude Code is asking to see.
+            if let Some((windows, age)) = self.app_reading(now) {
+                let fresh = age <= APP_SAMPLE_FRESH_MINS;
+                let mut snap = ProviderSnapshot::new(ProviderId::ClaudeCode)
+                    .with_source("claude app")
+                    .with_windows(windows)
+                    .with_sessions(sessions);
+                snap.health = if fresh { Health::Ok } else { Health::Stale };
+                snap.detail = Some(if fresh {
+                    "Read by the Claude app, which watches the same limits".into()
+                } else {
+                    "The Claude app isn't running; these are the last figures it took".into()
+                });
+                return snap;
+            }
+
             if !installed && sessions.is_empty() {
                 return ProviderSnapshot::degraded(
                     ProviderId::ClaudeCode,
@@ -1083,7 +1218,16 @@ impl ClaudeAdapter {
                 detail = format!("{detail} (showing figures from {} ago)", human_age(age));
                 (windows.clone(), account.clone(), "oauth (cached)")
             }
-            None => (Self::transcript_windows(&sessions), None, "transcripts"),
+            // Nothing of our own to fall back on: the desktop app's reading of
+            // the same windows beats a blank ring, and beats token counts that
+            // answer a different question.
+            None => match self.app_reading(now) {
+                Some((windows, _)) => {
+                    detail = format!("{detail} (showing the Claude app's reading)");
+                    (windows, None, "claude app")
+                }
+                None => (Self::transcript_windows(&sessions), None, "transcripts"),
+            },
         };
 
         let mut snap = ProviderSnapshot::new(ProviderId::ClaudeCode)
@@ -1698,15 +1842,113 @@ mod tests {
     #[tokio::test]
     async fn a_missing_install_reports_unavailable_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
+        // Nothing of Claude Code's, and no desktop app either.
         let mut adapter = ClaudeAdapter::with_paths(
             reqwest::Client::new(),
             ClaudePaths {
                 root: dir.path().join("does-not-exist"),
             },
-        );
+        )
+        .with_app_usage(None);
         let snap = adapter.collect(at(NOW)).await;
         assert_eq!(snap.health, Health::Unavailable);
         assert!(snap.windows.is_empty());
+    }
+
+    /// A history file shaped like the desktop app's, taken `mins` ago.
+    fn write_app_usage(dir: &Path, mins: i64, five_hour: i64, weekly: i64) -> PathBuf {
+        let path = dir.join("plan-usage-history.json");
+        let taken = (at(NOW) - chrono::Duration::minutes(mins)).timestamp_millis();
+        // With an older sample on either side of it, so the newest is what is
+        // read rather than the first or the last in the list.
+        let raw = format!(
+            r#"{{"version":2,"samples":[
+                 {{"t":{older},"org":"an-org","u":{{"fh":99,"sd":99}}}},
+                 {{"t":{taken},"org":"an-org","u":{{"fh":{five_hour},"sd":{weekly},"xu":0}}}},
+                 {{"t":{older},"org":"an-org","u":{{"fh":98,"sd":98}}}}
+               ]}}"#,
+            older = taken - 900_000,
+        );
+        std::fs::write(&path, raw).unwrap();
+        path
+    }
+
+    /// An adapter with no Claude Code of its own, reading the app's history.
+    fn app_only_adapter(dir: &Path, usage: PathBuf) -> ClaudeAdapter {
+        ClaudeAdapter::with_paths(
+            reqwest::Client::new(),
+            ClaudePaths {
+                root: dir.join("no-claude-code"),
+            },
+        )
+        .with_app_usage(Some(usage))
+    }
+
+    #[test]
+    fn the_newest_sample_of_the_app_history_is_the_one_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_app_usage(dir.path(), 10, 41, 36);
+        let reading = parse_app_usage(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(reading.five_hour_pct, Some(41.0));
+        assert_eq!(reading.seven_day_pct, Some(36.0));
+        assert_eq!(reading.taken_at, at(NOW) - chrono::Duration::minutes(10));
+    }
+
+    #[tokio::test]
+    async fn the_desktop_app_stands_in_where_claude_code_never_signed_in() {
+        // Someone with the Claude app and not Claude Code: no directory of its
+        // own, no credentials, no transcripts -- and limits to show anyway.
+        let dir = tempfile::tempdir().unwrap();
+        let usage = write_app_usage(dir.path(), 10, 41, 36);
+        let mut adapter = app_only_adapter(dir.path(), usage);
+
+        let snap = adapter.collect(at(NOW)).await;
+        assert_eq!(snap.health, Health::Ok);
+        assert_eq!(snap.source.as_deref(), Some("claude app"));
+        assert_eq!(snap.windows.len(), 2);
+        assert_eq!(snap.windows[0].key, "five_hour");
+        assert_eq!(snap.windows[0].used_pct, Some(41.0));
+        assert_eq!(snap.windows[1].key, "seven_day");
+        assert_eq!(snap.windows[1].used_pct, Some(36.0));
+        // Not an estimate of ours: the app read these where the endpoint would.
+        assert!(!snap.windows[0].estimated);
+    }
+
+    #[tokio::test]
+    async fn an_app_that_stopped_watching_keeps_only_what_still_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three hours old: the five-hour window may have rolled over unseen,
+        // while the week only ever grows, so it stays as a floor.
+        let usage = write_app_usage(dir.path(), 180, 41, 36);
+        let mut adapter = app_only_adapter(dir.path(), usage);
+
+        let snap = adapter.collect(at(NOW)).await;
+        assert_eq!(snap.health, Health::Stale);
+        assert_eq!(snap.windows.len(), 1);
+        assert_eq!(snap.windows[0].key, "seven_day");
+    }
+
+    #[tokio::test]
+    async fn a_day_old_app_reading_says_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage = write_app_usage(dir.path(), 24 * 60, 41, 36);
+        let mut adapter = app_only_adapter(dir.path(), usage);
+
+        let snap = adapter.collect(at(NOW)).await;
+        assert_eq!(snap.health, Health::Unavailable);
+        assert!(snap.windows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_extra_account_never_borrows_the_app_account_s_figures() {
+        // The app is signed into one account; a second Claude Code account is
+        // not it, and would be showing someone else's limits under its name.
+        let dir = tempfile::tempdir().unwrap();
+        let usage = write_app_usage(dir.path(), 5, 41, 36);
+        let mut adapter = app_only_adapter(dir.path(), usage).own_credentials_only();
+
+        let snap = adapter.collect(at(NOW)).await;
+        assert_eq!(snap.health, Health::Unavailable);
     }
 
     #[tokio::test]
@@ -1729,7 +1971,8 @@ mod tests {
             ClaudePaths {
                 root: dir.path().to_path_buf(),
             },
-        );
+        )
+        .with_app_usage(None);
         let snap = adapter.collect(at(NOW)).await;
         assert_eq!(snap.health, Health::NeedsAuth);
         assert_eq!(snap.activity, Activity::Generating);

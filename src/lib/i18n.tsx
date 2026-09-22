@@ -508,6 +508,10 @@ const SERVER: Record<Exclude<Lang, "en">, Record<string, string>> = {
     "Rate limited; retrying shortly": "Limite de requisições atingido; tentando de novo em breve",
     "Can't reach Claude; retrying shortly": "Sem conexão com o Claude; tentando de novo em breve",
     "Sign in with `claude` to show usage limits": "Entre com `claude` para ver os limites de uso",
+    "Read by the Claude app, which watches the same limits":
+      "Lido pelo app do Claude, que acompanha os mesmos limites",
+    "The Claude app isn't running; these are the last figures it took":
+      "O app do Claude não está aberto; estes são os últimos números que ele leu",
     "No recent Codex activity to read limits from": "Nenhuma atividade recente do Codex para ler os limites",
     "Perplexity keeps usage server-side; nothing local to read": "O Perplexity guarda o uso no servidor; nada local para ler",
     "Run `gemini` to sign in": "Rode `gemini` para entrar",
@@ -536,6 +540,10 @@ const SERVER: Record<Exclude<Lang, "en">, Record<string, string>> = {
     "Rate limited; retrying shortly": "Límite de solicitudes alcanzado; reintentando en breve",
     "Can't reach Claude; retrying shortly": "No se puede conectar con Claude; reintentando en breve",
     "Sign in with `claude` to show usage limits": "Inicia sesión con `claude` para ver los límites de uso",
+    "Read by the Claude app, which watches the same limits":
+      "Leído por la app de Claude, que sigue los mismos límites",
+    "The Claude app isn't running; these are the last figures it took":
+      "La app de Claude no está abierta; estas son las últimas cifras que leyó",
     "No recent Codex activity to read limits from": "No hay actividad reciente de Codex para leer los límites",
     "Perplexity keeps usage server-side; nothing local to read": "Perplexity guarda el uso en el servidor; no hay nada local que leer",
     "Run `gemini` to sign in": "Ejecuta `gemini` para iniciar sesión",

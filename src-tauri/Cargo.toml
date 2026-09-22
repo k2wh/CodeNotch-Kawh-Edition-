@@ -2,14 +2,14 @@
 members = ["core"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 
 [package]
 name = "codenotch"
-version = "0.2.1"
+version = "0.2.2"
 description = "A Windows HUD overlay for AI coding-assistant usage limits"
 authors = ["CodeNotch contributors"]
 license = "MIT"
