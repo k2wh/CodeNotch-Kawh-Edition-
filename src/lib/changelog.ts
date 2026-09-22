@@ -21,6 +21,24 @@ export interface Release {
 
 export const CHANGELOG: Release[] = [
   {
+    version: "0.2.1",
+    date: "2026-09-22",
+    changes: {
+      en: [
+        "Claude Opus 5.5 has its own rates, so what a plan has returned counts its tokens at what they would have cost: $4 in and $20 out per million, with cache reads at a twentieth of input rather than the usual tenth.",
+        "The first version to arrive through the update ring.",
+      ],
+      pt: [
+        "O Claude Opus 5.5 entrou na tabela de preços, então o quanto o plano rendeu conta os tokens dele pelo que custariam: $4 de entrada e $20 de saída por milhão, com a leitura de cache a um vinte avos da entrada, e não ao décimo de sempre.",
+        "A primeira versão a chegar pelo anel de atualização.",
+      ],
+      es: [
+        "Claude Opus 5.5 ya tiene sus propias tarifas, así que lo que el plan ha rendido cuenta sus tokens por lo que habrían costado: $4 de entrada y $20 de salida por millón, con las lecturas de caché a una veinteava parte de la entrada, no a la décima de siempre.",
+        "La primera versión que llega por el anillo de actualización.",
+      ],
+    },
+  },
+  {
     version: "0.2.0",
     date: "2026-09-22",
     changes: {

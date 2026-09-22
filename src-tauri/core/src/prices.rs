@@ -61,6 +61,9 @@ const TABLE: &[(&str, Price)] = &[
     ("claude-mythos-5-1", Price::new(10.0, 50.0, 12.50, 0.25)),
     ("claude-fable-5", Price::new(10.0, 50.0, 12.50, 1.0)),
     ("claude-mythos-5", Price::new(10.0, 50.0, 12.50, 1.0)),
+    // Opus 5.5 costs less than the 5 before it, and its cache reads are a
+    // twentieth of input where every other model here charges a tenth.
+    ("claude-opus-5-5", Price::new(4.0, 20.0, 5.0, 0.20)),
     ("claude-opus-5", Price::new(5.0, 25.0, 6.25, 0.50)),
     ("claude-opus-4-8", Price::new(5.0, 25.0, 6.25, 0.50)),
     ("claude-opus-4-7", Price::new(5.0, 25.0, 6.25, 0.50)),
@@ -97,8 +100,9 @@ const TABLE: &[(&str, Price)] = &[
     ("o3", Price::new(2.0, 8.0, 2.0, 0.50)),
     ("o1-pro", Price::new(150.0, 600.0, 150.0, 150.0)),
     ("o1", Price::new(15.0, 60.0, 15.0, 7.50)),
-    // Families, for names this table hasn't met yet.
-    ("opus", Price::new(5.0, 25.0, 6.25, 0.50)),
+    // Families, for names this table hasn't met yet: the newest of each, which
+    // is what a bare name most likely resolves to.
+    ("opus", Price::new(4.0, 20.0, 5.0, 0.20)),
     ("sonnet", Price::new(2.0, 10.0, 2.50, 0.20)),
     ("haiku", Price::new(1.0, 5.0, 1.25, 0.10)),
     ("codex", Price::new(1.75, 14.0, 1.75, 0.175)),
@@ -149,7 +153,22 @@ mod tests {
     #[test]
     fn a_bare_alias_is_priced_as_the_current_model() {
         assert_eq!(for_model(Some("sonnet")).unwrap().input, 2.0);
-        assert_eq!(for_model(Some("opus")).unwrap().input, 5.0);
+        assert_eq!(for_model(Some("opus")).unwrap().input, 4.0);
+    }
+
+    #[test]
+    fn opus_5_5_is_read_before_the_5_whose_name_it_starts_with() {
+        let new = for_model(Some("claude-opus-5-5-20260301")).unwrap();
+        assert_eq!(new.input, 4.0);
+        assert_eq!(new.output, 20.0);
+        assert_eq!(new.cache_write, 5.0);
+        assert_eq!(new.cache_write_1h, 8.0);
+        assert_eq!(new.cache_read, 0.20);
+
+        // The one before it keeps its own, dearer rates.
+        let before = for_model(Some("claude-opus-5-20260115")).unwrap();
+        assert_eq!(before.input, 5.0);
+        assert_eq!(before.cache_read, 0.50);
     }
 
     #[test]
@@ -162,7 +181,7 @@ mod tests {
     #[test]
     fn a_model_released_after_this_table_is_priced_like_its_family() {
         let unheard_of = for_model(Some("claude-opus-9-20281231")).unwrap();
-        assert_eq!(unheard_of.input, 5.0);
+        assert_eq!(unheard_of.input, 4.0);
     }
 
     #[test]
