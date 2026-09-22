@@ -4,9 +4,10 @@
 //! The updater plugin does the parts that have to be exactly right: reading
 //! the release's `latest.json`, downloading, and checking the download against
 //! the public key in `tauri.conf.json` before anything runs, so a file that
-//! wasn't signed with this project's key is refused. This module decides when
-//! to ask, keeps what it found, and tells the webview, which draws it as one
-//! more ring on the strip.
+//! wasn't signed with this project's key is refused (the private half never
+//! leaves the maintainer's machine — see `packaging/sign-release.sh`). This
+//! module decides when to ask, keeps what it found, and tells the webview,
+//! which draws it as one more ring on the strip.
 //!
 //! Nothing installs on its own. `auto` downloads in the background and
 //! `notify` only says a release is out; either way the app restarts only when

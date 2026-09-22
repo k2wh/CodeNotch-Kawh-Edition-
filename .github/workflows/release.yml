@@ -1,13 +1,14 @@
 name: Release
 
 # Builds the three installers from a release's own tag, each on the system it
-# is for, signs them with the updater key, and attaches them to the release
-# along with the `latest.json` that installed copies read to find the next
-# version.
+# is for, and attaches them to the release.
 #
-# The signing key lives in the TAURI_SIGNING_PRIVATE_KEY secret. Without it an
-# installed app refuses an update, so a release built anywhere else can't
-# reach anyone.
+# It does not sign them. An installed copy only accepts an update signed with
+# this project's key, and that key stays on the maintainer's machine rather
+# than in a secret here: `packaging/sign-release.sh` signs the files this
+# workflow attached and adds the `latest.json` that installed copies read.
+# Until it runs, a release is something to install by hand, which is what the
+# download links are for anyway.
 on:
   release:
     types: [published]
@@ -23,11 +24,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.event.release.tag_name }}
-  # Updater archives and signatures are only made here, where the key is; a
-  # build on someone's own machine needs neither.
-  UPDATER: '{"bundle":{"createUpdaterArtifacts":true}}'
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
 jobs:
   version:
@@ -79,17 +75,12 @@ jobs:
       - run: npm ci
 
       - name: Build the installer
-        run: npx tauri build --bundles nsis --config "$UPDATER"
-
-      - name: Check it was signed
-        run: |
-          ls -la src-tauri/target/release/bundle/nsis/
-          test -f src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+        run: npx tauri build --bundles nsis
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: src-tauri/target/release/bundle/nsis/*-setup.exe*
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
   linux:
@@ -123,25 +114,12 @@ jobs:
       - run: npm ci
 
       - name: Build the package
-        run: npx tauri build --bundles deb --config "$UPDATER"
-
-      # The updater installs the .deb itself, so it needs a signature beside
-      # it. Signed here if the bundler didn't.
-      - name: Sign it
-        run: |
-          set -euo pipefail
-          debs=(src-tauri/target/release/bundle/deb/*.deb)
-          deb=${debs[0]}
-          if [ ! -f "$deb.sig" ]; then
-            echo "signing $deb"
-            npx tauri signer sign "$deb"
-          fi
-          ls -la src-tauri/target/release/bundle/deb/
+        run: npx tauri build --bundles deb
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: src-tauri/target/release/bundle/deb/*.deb*
+          path: src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
 
   macos:
@@ -173,10 +151,10 @@ jobs:
       # build gets, and fall back to a plain .dmg if Finder doesn't cooperate.
       - name: Build the app and the .dmg
         run: |
-          if ! TAURI_BUNDLER_DMG_IGNORE_CI=true bash packaging/macos/build.sh --config "$UPDATER"; then
+          if ! TAURI_BUNDLER_DMG_IGNORE_CI=true bash packaging/macos/build.sh; then
             echo "::warning::Finder didn't lay out the .dmg window; building a plain one"
             rm -rf src-tauri/target/universal-apple-darwin/release/bundle/dmg
-            bash packaging/macos/build.sh --config "$UPDATER"
+            bash packaging/macos/build.sh
           fi
 
       - name: Check the bundle
@@ -186,14 +164,12 @@ jobs:
           apps=("$bundle"/macos/*.app); app=${apps[0]}
           dmgs=("$bundle"/dmg/CodeNotch_*.dmg); dmg=${dmgs[0]}
           exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
-          # One binary for both kinds of Mac, signed, in a sound disk image,
-          # with the signed archive the updater replaces it from.
+          # One binary for both kinds of Mac, signed, in a sound disk image.
           archs=$(lipo -archs "$exe")
           echo "architectures: $archs"
           [[ $archs == *x86_64* && $archs == *arm64* ]]
           codesign --verify --deep --strict --verbose=2 "$app"
           hdiutil verify "$dmg"
-          test -f "$bundle/macos/CodeNotch.app.tar.gz.sig"
           shasum -a 256 "$dmg"
           { echo "EXE=$exe"; echo "DMG=$dmg"; } >> "$GITHUB_ENV"
 
@@ -229,16 +205,16 @@ jobs:
           kill "$pid"
           cat smoke/app.log
 
-      # The archive carries the version in its name here, so a release's
-      # assets say which build they are.
-      - name: Name the updater archive after its version
+      # What the updater replaces an installed app with: the .app as a
+      # gzipped tar, which is the shape the plugin unpacks — the bundler makes
+      # this one itself when it has a key, and it doesn't here.
+      - name: Pack the app for the updater
         run: |
+          set -euo pipefail
           bundle=src-tauri/target/universal-apple-darwin/release/bundle/macos
           version=$(jq -r .version src-tauri/tauri.conf.json)
-          for suffix in "" ".sig"; do
-            mv "$bundle/CodeNotch.app.tar.gz$suffix" \
-               "$bundle/CodeNotch_${version}_universal.app.tar.gz$suffix"
-          done
+          tar -czf "$bundle/CodeNotch_${version}_universal.app.tar.gz" -C "$bundle" CodeNotch.app
+          tar -tzf "$bundle/CodeNotch_${version}_universal.app.tar.gz" | head -3
           ls -la "$bundle"
 
       - uses: actions/upload-artifact@v4
@@ -248,7 +224,6 @@ jobs:
           path: |
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/CodeNotch_*.dmg
             src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
             smoke/
           if-no-files-found: warn
 
@@ -266,69 +241,19 @@ jobs:
         with:
           path: assets
 
-      # `latest.json` is what an installed copy reads: the version on offer,
-      # the notes it shows, and per platform the file to download with the
-      # signature it has to match. The keys are the ones the updater asks for,
-      # `{os}-{arch}-{installer}` first and `{os}-{arch}` after it.
-      - name: Write latest.json
+      - name: Attach the installers to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Exactly one file per glob, or the manifest would name the wrong
-          # one — and quietly, since it is only read weeks later.
-          one() {
-            local -a found=($1)
-            if [ ${#found[@]} -ne 1 ]; then
-              echo "::error::expected one file matching $1, found ${#found[@]}"
-              exit 1
-            fi
-            printf '%s' "${found[0]}"
-          }
-          version=$(jq -r .version src-tauri/tauri.conf.json)
-          base="https://github.com/${{ github.repository }}/releases/download/$TAG"
-          exe=$(one 'assets/windows/*-setup.exe')
-          deb=$(one 'assets/linux/*.deb')
-          app=$(one 'assets/macos/*.app.tar.gz')
-          notes=$(gh release view "$TAG" --json body --jq .body)
-
-          entry() { jq -n --arg url "$base/$(basename "$1")" --arg sig "$(cat "$1.sig")" \
-            '{signature: $sig, url: $url}'; }
-          jq -n \
-            --arg version "$version" \
-            --arg notes "$notes" \
-            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --argjson windows "$(entry "$exe")" \
-            --argjson linux "$(entry "$deb")" \
-            --argjson mac "$(entry "$app")" \
-            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {
-               "windows-x86_64-nsis": $windows,
-               "windows-x86_64": $windows,
-               "linux-x86_64-deb": $linux,
-               "linux-x86_64": $linux,
-               "darwin-aarch64-app": $mac,
-               "darwin-aarch64": $mac,
-               "darwin-x86_64-app": $mac,
-               "darwin-x86_64": $mac
-             }}' > latest.json
-          cat latest.json | head -20
-
-      - name: Attach everything
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          # The installers first and the manifest last: until it is there, an
-          # installed copy sees no update rather than a broken one.
-          gh release upload "$TAG" --clobber \
-            assets/windows/*-setup.exe \
-            assets/windows/*-setup.exe.sig \
-            assets/linux/*.deb \
-            assets/linux/*.deb.sig \
-            assets/macos/*.dmg \
-            assets/macos/*.app.tar.gz \
-            assets/macos/*.app.tar.gz.sig
-          gh release upload "$TAG" --clobber latest.json
+          ls -la assets/*/
+          gh release upload "$TAG" --clobber             assets/windows/*-setup.exe             assets/linux/*.deb             assets/macos/*.dmg             assets/macos/*.app.tar.gz
           gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size)"'
+
+      # Signing happens on the maintainer's machine, where the key is: see
+      # packaging/sign-release.sh. Until it has run, an installed copy finds
+      # no update and this release is one to install by hand.
+      - name: Say what is still missing
+        run: |
+          echo "::notice::installers attached. Run 'bash packaging/sign-release.sh $TAG' to sign them and publish latest.json."
