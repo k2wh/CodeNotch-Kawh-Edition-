@@ -129,7 +129,9 @@ jobs:
       # it. Signed here if the bundler didn't.
       - name: Sign it
         run: |
-          deb=$(ls src-tauri/target/release/bundle/deb/*.deb)
+          set -euo pipefail
+          debs=(src-tauri/target/release/bundle/deb/*.deb)
+          deb=${debs[0]}
           if [ ! -f "$deb.sig" ]; then
             echo "signing $deb"
             npx tauri signer sign "$deb"
@@ -179,9 +181,10 @@ jobs:
 
       - name: Check the bundle
         run: |
+          set -euo pipefail
           bundle=src-tauri/target/universal-apple-darwin/release/bundle
-          app=$(ls -d "$bundle"/macos/*.app)
-          dmg=$(ls "$bundle"/dmg/CodeNotch_*.dmg)
+          apps=("$bundle"/macos/*.app); app=${apps[0]}
+          dmgs=("$bundle"/dmg/CodeNotch_*.dmg); dmg=${dmgs[0]}
           exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
           # One binary for both kinds of Mac, signed, in a sound disk image,
           # with the signed archive the updater replaces it from.
@@ -273,11 +276,21 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Exactly one file per glob, or the manifest would name the wrong
+          # one — and quietly, since it is only read weeks later.
+          one() {
+            local -a found=($1)
+            if [ ${#found[@]} -ne 1 ]; then
+              echo "::error::expected one file matching $1, found ${#found[@]}"
+              exit 1
+            fi
+            printf '%s' "${found[0]}"
+          }
           version=$(jq -r .version src-tauri/tauri.conf.json)
           base="https://github.com/${{ github.repository }}/releases/download/$TAG"
-          exe=$(ls assets/windows/*-setup.exe)
-          deb=$(ls assets/linux/*.deb)
-          app=$(ls assets/macos/*.app.tar.gz)
+          exe=$(one 'assets/windows/*-setup.exe')
+          deb=$(one 'assets/linux/*.deb')
+          app=$(one 'assets/macos/*.app.tar.gz')
           notes=$(gh release view "$TAG" --json body --jq .body)
 
           entry() { jq -n --arg url "$base/$(basename "$1")" --arg sig "$(cat "$1.sig")" \
