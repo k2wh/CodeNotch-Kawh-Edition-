@@ -1,0 +1,119 @@
+name: Release
+
+# Builds the macOS installer on one of GitHub's Macs, since Apple's tools only
+# run on a Mac, and attaches it to the release. The Windows and Linux
+# installers are built on those systems (see packaging/).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to attach the .dmg to, e.g. v0.1.0 (empty = only build it)
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  macos:
+    name: macos installer
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      # The release's own source, whichever commit this workflow runs from.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: macos-release
+
+      # On CI Tauri skips having Finder lay out the .dmg window, in case Finder
+      # doesn't answer there. GitHub's Macs let it, so ask for the layout a Mac
+      # build gets, and fall back to a plain .dmg if Finder doesn't cooperate.
+      - name: Build the app and the .dmg
+        run: |
+          if ! TAURI_BUNDLER_DMG_IGNORE_CI=true bash packaging/macos/build.sh; then
+            echo "::warning::Finder didn't lay out the .dmg window; building a plain one"
+            rm -rf src-tauri/target/universal-apple-darwin/release/bundle/dmg
+            bash packaging/macos/build.sh
+          fi
+
+      - name: Check the bundle
+        run: |
+          bundle=src-tauri/target/universal-apple-darwin/release/bundle
+          app=$(ls -d "$bundle"/macos/*.app)
+          dmg=$(ls "$bundle"/dmg/CodeNotch_*.dmg)
+          exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          # One binary for both kinds of Mac, signed, in a sound disk image.
+          archs=$(lipo -archs "$exe")
+          echo "architectures: $archs"
+          [[ $archs == *x86_64* && $archs == *arm64* ]]
+          codesign --verify --deep --strict --verbose=2 "$app"
+          hdiutil verify "$dmg"
+          shasum -a 256 "$dmg"
+          { echo "EXE=$exe"; echo "DMG=$dmg"; } >> "$GITHUB_ENV"
+
+      # The code is tested on every push; this shows the app itself starts on
+      # a real Mac and puts its panel on screen.
+      - name: Launch it
+        timeout-minutes: 5
+        run: |
+          mkdir -p smoke
+          "$EXE" > smoke/app.log 2>&1 &
+          pid=$!
+          sleep 20
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::CodeNotch quit at launch"
+            cat smoke/app.log
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/windows.swift" <<'EOF'
+          import CoreGraphics
+          let pid = Int(CommandLine.arguments[1])!
+          print("display", CGDisplayBounds(CGMainDisplayID()))
+          let all = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+          for w in all where w[kCGWindowOwnerPID as String] as? Int == pid {
+            let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            print("layer", w[kCGWindowLayer as String] ?? "?",
+                  "onscreen", w[kCGWindowIsOnscreen as String] ?? 0,
+                  "x", b["X"] ?? "?", "y", b["Y"] ?? "?",
+                  "w", b["Width"] ?? "?", "h", b["Height"] ?? "?")
+          }
+          EOF
+          swift "$RUNNER_TEMP/windows.swift" "$pid" | tee smoke/windows.txt || true
+          screencapture -x smoke/screen.png || true
+          kill "$pid"
+          cat smoke/app.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codenotch-macos
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/CodeNotch_*.dmg
+            smoke/
+          if-no-files-found: warn
+
+      - name: Attach the .dmg to the release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" "$DMG" --clobber

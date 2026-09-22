@@ -38,5 +38,6 @@ ls -d "$bundle"/macos/*.app "$bundle"/dmg/*.dmg 2>/dev/null
 echo
 echo "Open the .dmg and drag CodeNotch to Applications. The first time, macOS"
 echo "asks to allow reading Claude Code's login from the keychain: choose"
-echo "Always Allow. On another Mac, where the app arrives downloaded, open it"
-echo "with right-click > Open the first time: it isn't signed by Apple."
+echo "Always Allow. On another Mac, where the app arrives downloaded, allow it"
+echo "the first time in System Settings > Privacy & Security > Open Anyway"
+echo "(right-click > Open on macOS 14 and older): it isn't signed by Apple."

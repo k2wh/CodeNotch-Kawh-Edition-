@@ -15,8 +15,9 @@ that takes you to an agent's window and back, quiet alerts when you're already
 there, English, Portuguese and Spanish, and the Linux and macOS versions.
 
 **Download** from [Releases](https://github.com/k2wh/CodeNotch-Kawh-Edition-/releases):
-the `.exe` installer for Windows 10/11 and the `.deb` for Ubuntu 22.04+ and
-Pop!_OS 22.04 (an X11 session). The macOS app is built on a Mac, see
+the `.exe` installer for Windows 10/11, the `.deb` for Ubuntu 22.04+ and
+Pop!_OS 22.04 (an X11 session), and the `.dmg` for macOS 11 or newer, Apple
+Silicon and Intel alike. The Mac app is built on a Mac, see
 [packaging/macos](packaging/macos/README.md); the Linux one in Docker, see
 [packaging/linux](packaging/linux/README.md).
 
