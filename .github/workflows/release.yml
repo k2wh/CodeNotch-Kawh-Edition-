@@ -217,14 +217,28 @@ jobs:
           tar -tzf "$bundle/CodeNotch_${version}_universal.app.tar.gz" | head -3
           ls -la "$bundle"
 
+      # Gathered into one folder first: an artifact made from paths with
+      # nothing in common keeps the whole tree they came from, and the job
+      # that attaches them would have to know that tree.
+      - name: Gather what ships
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bundle=src-tauri/target/universal-apple-darwin/release/bundle
+          cp "$bundle"/dmg/CodeNotch_*.dmg "$bundle"/macos/*.app.tar.gz out/
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: out/*
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos
-          path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/CodeNotch_*.dmg
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
-            smoke/
+          name: macos-smoke
+          path: smoke/
           if-no-files-found: warn
 
   publish:
@@ -248,7 +262,16 @@ jobs:
         run: |
           set -euo pipefail
           ls -la assets/*/
-          gh release upload "$TAG" --clobber             assets/windows/*-setup.exe             assets/linux/*.deb             assets/macos/*.dmg             assets/macos/*.app.tar.gz
+          # Found by name rather than by folder, so a build's artifact can
+          # arrive in whatever shape it likes.
+          mapfile -t files < <(find assets -type f \
+            \( -name '*-setup.exe' -o -name '*.deb' -o -name '*.dmg' -o -name '*.app.tar.gz' \) | sort)
+          printf 'attaching %s\n' "${files[@]}"
+          if [ ${#files[@]} -ne 4 ]; then
+            echo "::error::expected the four files that ship, found ${#files[@]}"
+            exit 1
+          fi
+          gh release upload "$TAG" --clobber "${files[@]}"
           gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size)"'
 
       # Signing happens on the maintainer's machine, where the key is: see
