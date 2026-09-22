@@ -1,0 +1,131 @@
+[workspace]
+members = ["core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+[package]
+name = "codenotch"
+version = "0.1.0"
+description = "A Windows HUD overlay for AI coding-assistant usage limits"
+authors = ["CodeNotch contributors"]
+license = "MIT"
+repository = "https://github.com/Rohanx04/CodeNotch"
+edition = "2021"
+rust-version = "1.82"
+
+[lib]
+# Tauri wants the app logic in a lib so integration tests and mobile targets can
+# reuse it; `codenotch_lib` avoids colliding with the binary name on Windows.
+name = "codenotch_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `macos-private-api`: a transparent window on macOS goes through it (see
+# `macOSPrivateApi` in tauri.conf.json). Elsewhere it builds to nothing.
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+
+# native-tls => schannel on Windows: no bundled C crypto, uses the OS trust store.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "charset",
+  "http2",
+  "native-tls",
+  "system-proxy",
+] }
+
+codenotch-core = { path = "core" }
+
+anyhow = "1"
+thiserror = "2"
+# Window thumbnails for the "stay behind" picker. Both already ship in the
+# dependency tree (via Tauri), so they add nothing new to the build.
+png = "0.17"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+dirs = "7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The X11 half of the notch: what the window manager is asked, which part of
+# the window takes clicks, and what the rest of the desktop is doing. Pure
+# Rust, and usable from any thread, unlike GTK's own connection.
+x11rb = { version = "0.13", features = ["randr", "shape"] }
+# Tauri's window is GTK underneath; realising it early gives it an X11 id.
+# Both already ship in the dependency tree, at these versions.
+gtk = "0.18"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# AppKit, for turning the window into the original's non-activating panel
+# and for the apps a ring raises; libc for walking up from an agent's
+# process to its app. All already in the tree, through Tauri.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "libc",
+  "NSPanel",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSWindow",
+  "NSWorkspace",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSLocale",
+  "NSString",
+  "NSURL",
+] }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Tuning WebView2's memory use. `windows-core` 0.61 is what webview2-com
+# builds on, and its `Interface` trait is what casts to the newer interface.
+webview2-com = "0.38"
+windows-core = "0.61"
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_Globalization",
+  "Win32_Security_Credentials",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_Storage_Xps",
+  "Win32_Storage_Packaging_Appx",
+  "Win32_System_Com",
+  "Win32_System_Threading",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Registry",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Shell",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Tauri's `custom-protocol` is what `tauri build` turns on to embed the frontend.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

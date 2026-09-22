@@ -1,0 +1,1160 @@
+@import "tailwindcss";
+
+/* Colour names the components use (`text-notch-muted`, `bg-state-bad/20`, …).
+   Without these Tailwind silently drops the classes and every label renders
+   in the same full-strength ink. */
+@theme {
+  --color-notch-text: #f5f5f7;
+  --color-notch-muted: #a1a1aa;
+  --color-notch-faint: #6b6b74;
+  --color-state-bad: #ff453a;
+}
+
+/*
+ * The notch is a solid black strip carved into a screen edge, so unlike the
+ * rest of the window it is opaque -- the page stays transparent and only the
+ * strip and the popover paint.
+ */
+
+:root {
+  /* Pure black: the strip has to read as display that isn't there, and any
+     lift at all makes it a dark panel sitting on the desktop instead. */
+  --notch-black: #000000;
+  --notch-line: rgb(255 255 255 / 0.07);
+  /* The card is the same black as the strip: one carved surface, not a panel
+     floating beside it. */
+  --popover-bg: #000000;
+
+  --ink: #f5f5f7;
+  --ink-dim: #a1a1aa;
+  --ink-faint: #6b6b74;
+
+  --ring-track: #303030;
+
+  /* Traffic light: the further through the limit, the hotter the ring. */
+  --tone-low: #00ff89;
+  --tone-mid: #f3ff00;
+  --tone-high: #ff3e00;
+  --tone-busy: #22d3ee;
+  --tone-bad: #ff453a;
+  --tone-stale: #6b6b74;
+  --tone-off: #3a3a3f;
+
+  /* Overwritten from the config's accent at runtime. */
+  --accent: #22d3ee;
+}
+
+/*
+ * Deliberately NOT `color-scheme: dark` on the root: that makes the browser
+ * paint an opaque dark canvas behind the page, which shows up as a black
+ * rectangle around the notch instead of the desktop. Only the native controls
+ * need the dark scheme.
+ */
+select,
+input,
+textarea {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  font-family:
+    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 12px;
+  color: var(--ink);
+  /* The HUD is a readout, not a document: selection and the caret are noise. */
+  user-select: none;
+  cursor: default;
+  -webkit-font-smoothing: antialiased;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* --- The strip ---------------------------------------------------------- */
+
+/*
+ * The black is painted by NotchShape's SVG path, not by this element: the
+ * corners are concave, which `border-radius` cannot express.
+ */
+.notch-strip {
+  position: relative;
+  display: flex;
+  box-sizing: border-box;
+}
+
+.notch-silhouette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.notch-rings {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-around;
+}
+
+.ring-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The settings gear at the tail of the strip: present but never competing with
+   the rings for attention. */
+.strip-settings {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: 2px auto 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+.strip-settings svg {
+  width: 14px;
+  height: 14px;
+}
+.strip-settings:hover,
+.strip-settings[data-active] {
+  color: var(--ink);
+  background: rgb(255 255 255 / 0.08);
+}
+
+/* --- A provider ring ---------------------------------------------------- */
+
+.ring-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  transition: transform 160ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.ring-slot:hover,
+.ring-slot[data-active] {
+  transform: scale(1.06);
+}
+.ring-slot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 12px;
+}
+
+/* No fill: in the reference the ring is a track and a mark, and the strip's
+   black shows through the middle. */
+.ring-disc {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.ring-arc {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.ring-mark {
+  position: relative;
+  color: var(--ink);
+}
+
+.ring-pct {
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  /* The countdown is narrower type than the percentage it replaces; easing
+     between the two sizes keeps the swap from snapping. */
+  transition: font-size 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Spent: breathing rather than flashing. It has to be noticeable from across
+   the room without becoming something you want to cover with a hand, since
+   the wait it is counting can be hours long. */
+.ring-pct[data-blocked] {
+  color: var(--tone-high);
+  animation: ring-spent-breathe 2.8s ease-in-out infinite;
+}
+
+@keyframes ring-spent-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring-pct[data-blocked] {
+    animation: none;
+  }
+}
+
+/* Weekly window as an underline beneath the percentage. The slot's gap is
+   tightened by the negative margin so it reads as part of the number. */
+.ring-weekly {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: -4px;
+}
+.ring-weekly-track {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--ring-track);
+  overflow: hidden;
+}
+.ring-weekly-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 3px;
+  border-radius: inherit;
+  transition: width 500ms ease, background-color 300ms ease;
+}
+.ring-weekly-label {
+  color: var(--ink-dim);
+  font-weight: 500;
+  line-height: 1;
+}
+
+/* --- The detail popover ------------------------------------------------- */
+
+/*
+ * `relative`, not `absolute`: the wrapper in App.tsx does the positioning, and
+ * an absolutely-positioned card would collapse that wrapper to zero height --
+ * which is exactly what the measurement needs in order to centre the card on
+ * its ring.
+ */
+.popover {
+  position: relative;
+  width: 100%;
+  padding: 14px 16px 15px;
+  border-radius: 18px;
+  background: var(--popover-bg);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.55);
+  box-sizing: border-box;
+}
+
+/*
+ * The tail points back at the ring that opened the popover. `--tail-offset` is
+ * the ring's centre in window coordinates, so with several rings stacked the
+ * tail always lands on the right one.
+ */
+.popover-tail {
+  position: absolute;
+  overflow: visible;
+}
+.popover[data-edge="right"] .popover-tail {
+  left: 100%;
+  top: var(--tail-offset);
+  margin-top: calc(var(--tail-half) * -1);
+}
+.popover[data-edge="left"] .popover-tail {
+  right: 100%;
+  top: var(--tail-offset);
+  margin-top: calc(var(--tail-half) * -1);
+}
+.popover[data-edge="top"] .popover-tail {
+  bottom: 100%;
+  left: var(--tail-offset);
+  margin-left: calc(var(--tail-half) * -1);
+}
+.popover[data-edge="bottom"] .popover-tail {
+  top: 100%;
+  left: var(--tail-offset);
+  margin-left: calc(var(--tail-half) * -1);
+}
+
+/* The settings panel lays out its own padding and header rule. */
+.popover-flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.popover-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.popover-mark {
+  width: 15px;
+  height: 15px;
+  color: var(--ink);
+  flex-shrink: 0;
+}
+
+.popover-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.popover-activity {
+  margin-left: auto;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+}
+.popover-activity[data-state="awaitingInput"] {
+  color: var(--tone-mid);
+}
+.popover-activity[data-state="generating"] {
+  color: var(--tone-busy);
+}
+
+.popover-account {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+
+.popover-windows {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.usage-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.usage-label {
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.usage-reset {
+  font-size: 11px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+.usage-track {
+  margin-top: 7px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.12);
+  overflow: hidden;
+}
+
+.usage-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 500ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.usage-fill[data-tone="low"] {
+  background: var(--tone-low);
+}
+.usage-fill[data-tone="mid"] {
+  background: var(--tone-mid);
+}
+.usage-fill[data-tone="high"] {
+  background: var(--tone-high);
+}
+.usage-fill[data-tone="info"] {
+  background: var(--ink-dim);
+}
+
+/* The token reading sits beside the percentage, quieter than it: it is an
+   estimate, and the percentage is the number the provider stands behind. */
+.usage-tokens {
+  margin-left: 6px;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+  font-weight: 500;
+}
+
+/* Tokens in against tokens out, under the bar they belong to. */
+.usage-split {
+  display: flex;
+  gap: 10px;
+  margin-top: 3px;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+  font-weight: 500;
+}
+
+/* What the plan has returned, at the foot of the card. */
+.popover-value {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid rgb(255 255 255 / 8%);
+}
+
+.value-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.value-amount {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.value-multiple {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+
+/* Past break-even, the multiple is the good news on the card. */
+.value-multiple[data-good="true"] {
+  color: #4ade80;
+}
+
+.value-note {
+  margin-top: 2px;
+  color: var(--ink-faint);
+  font-size: 9px;
+  line-height: 1.3;
+}
+
+.usage-value {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+
+.popover-empty,
+.popover-note {
+  margin: 10px 0 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--ink-faint);
+}
+
+.popover-sessions {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--notch-line);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 4px;
+  margin: 0 -4px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 120ms ease;
+}
+.session-row:hover {
+  background: rgb(255 255 255 / 0.06);
+}
+
+.session-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--tone-off);
+}
+.session-dot[data-state="generating"] {
+  background: var(--tone-busy);
+}
+.session-dot[data-state="awaitingInput"] {
+  background: var(--tone-mid);
+  animation: notch-pulse 1.6s ease-in-out infinite;
+}
+.session-dot[data-state="done"] {
+  background: var(--tone-low);
+}
+
+.session-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+}
+
+.session-meta {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  color: var(--ink-faint);
+}
+
+/* --- Animations --------------------------------------------------------- */
+
+@keyframes notch-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.activity-spin {
+  transform-origin: 50% 50%;
+  animation: notch-spin 1.4s linear infinite;
+}
+
+@keyframes notch-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.activity-pulse {
+  animation: notch-pulse 1.6s ease-in-out infinite;
+}
+
+/* A halo pulsing out of the ring: an agent is waiting on you (amber), or one
+   just answered (green). Drawn on a pseudo-element so it composes with the
+   disc's own entrance animation and hover transform. */
+.ring-disc[data-attention]::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: attention-halo 1.8s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
+}
+.ring-disc[data-attention="waiting"]::after {
+  --halo: var(--tone-mid);
+}
+.ring-disc[data-attention="answered"]::after {
+  --halo: var(--tone-low);
+}
+
+@keyframes attention-halo {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--halo) 60%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--halo) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--halo) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring-disc[data-attention]::after {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--halo) 55%, transparent);
+  }
+}
+
+/* --- Entrance ------------------------------------------------------------
+   On launch the strip slides in from the screen edge, then each ring appears
+   in turn: the disc pops, the mark follows, and the number and weekly bar
+   rise into place while the arc draws and the percentage counts up (both in
+   ProviderRing). `backwards` fill only holds the start frame during the delay,
+   so hover transforms work normally once a ring has arrived. */
+
+@keyframes strip-in {
+  from {
+    transform: translate(var(--from-x-far), var(--from-y-far));
+  }
+  to {
+    transform: translate(0, 0);
+  }
+}
+@keyframes ring-disc-in {
+  from {
+    opacity: 0;
+    transform: scale(0.35);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes ring-mark-in {
+  from {
+    opacity: 0;
+    transform: scale(0) rotate(-35deg);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+@keyframes ring-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+[data-edge="right"] .notch-strip {
+  --from-x-far: 110%;
+  --from-y-far: 0px;
+}
+[data-edge="left"] .notch-strip {
+  --from-x-far: -110%;
+  --from-y-far: 0px;
+}
+[data-edge="top"] .notch-strip {
+  --from-x-far: 0px;
+  --from-y-far: -110%;
+}
+[data-edge="bottom"] .notch-strip {
+  --from-x-far: 0px;
+  --from-y-far: 110%;
+}
+.notch-strip {
+  animation: strip-in 620ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  /* Coming back from behind a game: decelerate into place, the same curve
+     the entrance uses, so reappearing reads as the notch arriving. */
+  transition:
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 260ms ease-out;
+}
+
+/* Getting out of the way of a game or a video: back into the edge the
+   entrance came out of. Faster than the return and accelerating, because
+   something else wants the screen. The window only drops behind whatever is
+   in front once this has played — otherwise the motion would happen out of
+   sight, behind the very thing the notch is making room for. */
+.notch-strip[data-tucked] {
+  transform: translate(var(--from-x-far), var(--from-y-far));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform 220ms cubic-bezier(0.55, 0, 1, 0.45),
+    opacity 180ms ease-in;
+}
+.ring-disc {
+  animation: ring-disc-in 560ms cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  animation-delay: var(--ring-delay, 0ms);
+}
+.ring-mark {
+  animation: ring-mark-in 480ms cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  animation-delay: calc(var(--ring-delay, 0ms) + 140ms);
+}
+.ring-pct {
+  animation: ring-rise-in 420ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--ring-delay, 0ms) + 200ms);
+}
+.ring-weekly {
+  animation: ring-rise-in 420ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--ring-delay, 0ms) + 280ms);
+}
+.ring-weekly-fill {
+  transition-delay: 120ms;
+}
+.strip-settings {
+  animation: ring-rise-in 420ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: 520ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notch-strip,
+  .ring-disc,
+  .ring-mark,
+  .ring-pct,
+  .ring-weekly,
+  .strip-settings {
+    animation: none;
+  }
+  /* Still gets out of the way — just without the travel. */
+  .notch-strip,
+  .notch-strip[data-tucked] {
+    transition: opacity 120ms linear;
+  }
+  .notch-strip[data-tucked] {
+    transform: none;
+  }
+}
+
+/* Cards emerge from the strip: they start nudged towards the screen edge and
+   settle inward. `--from-x` / `--from-y` point back at the edge. */
+[data-edge="right"] {
+  --from-x: 10px;
+  --from-y: 0px;
+}
+[data-edge="left"] {
+  --from-x: -10px;
+  --from-y: 0px;
+}
+[data-edge="top"] {
+  --from-x: 0px;
+  --from-y: -10px;
+}
+[data-edge="bottom"] {
+  --from-x: 0px;
+  --from-y: 10px;
+}
+
+@keyframes notch-reveal {
+  from {
+    opacity: 0;
+    transform: translate(var(--from-x), var(--from-y)) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+@keyframes notch-leave {
+  from {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(calc(var(--from-x) * 0.6), calc(var(--from-y) * 0.6)) scale(0.98);
+  }
+}
+
+/* The slot a card lives in. Hopping between rings moves it, so its position
+   glides rather than jumps; the card inside keeps its content. */
+.popover-slot {
+  transition:
+    top 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    left 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity, top, left;
+}
+
+.reveal {
+  animation: notch-reveal 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* Keep in step with LEAVE_MS in App.tsx. */
+.leaving {
+  animation: notch-leave 140ms cubic-bezier(0.4, 0, 1, 1) both;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-spin,
+  .activity-pulse,
+  .reveal,
+  .leaving,
+  .popover-slot,
+  .ring-slot {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* --- Dropdown ------------------------------------------------------------
+   The notch's own dropdown. The list expands inside the card rather than
+   floating over it: the window is clipped to what the card occupies, so a
+   native popup would be cut off at its edge. */
+
+.picker-button {
+  display: flex;
+  max-width: 132px;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px 3px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.08);
+  color: var(--ink);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+.picker-button:hover {
+  background: rgb(255 255 255 / 0.14);
+}
+.picker-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.picker-button svg[data-open] {
+  transform: rotate(180deg);
+}
+.picker-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Floats over the card, anchored to its control by inline top/bottom/right.
+   Opaque and lifted, because it sits on top of the rows it covers. */
+.card-float {
+  position: absolute;
+  z-index: 10;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 10px;
+  background: #16161a;
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.1),
+    0 12px 28px rgb(0 0 0 / 0.55);
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.16) transparent;
+}
+
+.picker-list {
+  display: flex;
+  width: 138px;
+  flex-direction: column;
+}
+
+.picker-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.picker-option:hover {
+  background: rgb(255 255 255 / 0.1);
+  color: var(--ink);
+}
+.picker-option[data-selected] {
+  color: var(--ink);
+  font-weight: 600;
+}
+.picker-option svg[data-shown] {
+  opacity: 1;
+  color: var(--accent);
+}
+.picker-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Colour picker -------------------------------------------------------- */
+
+.swatch {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.25);
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.swatch:hover,
+.swatch[data-open] {
+  transform: scale(1.18);
+}
+/* A ring around the chosen colour, off the colour itself. */
+.swatch[data-selected] {
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.25),
+    0 0 0 2px var(--popover-bg),
+    0 0 0 3.5px var(--ink);
+}
+
+.colour-pop {
+  display: flex;
+  width: 146px;
+  flex-direction: column;
+  gap: 7px;
+  padding: 2px;
+}
+
+.colour-auto {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 9.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.colour-auto:hover {
+  background: rgb(255 255 255 / 0.1);
+  color: var(--ink);
+}
+.colour-auto[data-selected] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.colour-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 7px;
+  place-items: center;
+  padding: 0 4px;
+}
+
+.colour-hue {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 4px 2px;
+}
+.colour-hue input {
+  width: 100%;
+  height: 8px;
+  appearance: none;
+  border-radius: 999px;
+  /* The spectrum itself is the track, so the slider reads as a colour bar. */
+  background: linear-gradient(
+    to right,
+    #ff0000,
+    #ffff00,
+    #00ff00,
+    #00ffff,
+    #0000ff,
+    #ff00ff,
+    #ff0000
+  );
+  cursor: pointer;
+}
+.colour-hue input::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  appearance: none;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.5);
+  cursor: pointer;
+}
+
+/* --- Window picker ("stay behind") --------------------------------------- */
+
+.picker-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px;
+  border: 0;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.03);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: 1px solid rgb(255 255 255 / 0.06);
+  outline-offset: -1px;
+  transition:
+    background-color 160ms ease,
+    outline-color 160ms ease,
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: picker-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.picker-card:hover {
+  background: rgb(255 255 255 / 0.06);
+  outline-color: rgb(255 255 255 / 0.14);
+  transform: translateY(-1px);
+}
+.picker-card:active {
+  transform: scale(0.98);
+}
+.picker-card[data-selected] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.picker-card:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+.picker-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #121214;
+}
+.picker-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top center;
+  transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1), filter 200ms ease;
+}
+.picker-card:hover .picker-thumb img {
+  transform: scale(1.03);
+}
+.picker-card[data-selected] .picker-thumb img {
+  filter: saturate(1.05) brightness(0.9);
+}
+.picker-thumb-empty {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+}
+
+/* The tick sits in the corner, and pops in when the card is picked. */
+.picker-check {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #000;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.5);
+  opacity: 0;
+  transform: scale(0.4);
+  transition:
+    opacity 140ms ease,
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.picker-card[data-selected] .picker-check {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.picker-meta {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 2px 1px;
+}
+.picker-app {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-transform: capitalize;
+}
+.picker-note {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  font-size: 8.5px;
+  font-weight: 600;
+  text-transform: none;
+}
+.picker-title {
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-skeleton {
+  aspect-ratio: 16 / 13;
+  border-radius: 12px;
+  background: linear-gradient(
+    100deg,
+    rgb(255 255 255 / 0.04) 30%,
+    rgb(255 255 255 / 0.09) 50%,
+    rgb(255 255 255 / 0.04) 70%
+  );
+  background-size: 250% 100%;
+  animation: picker-shimmer 1.3s linear infinite;
+}
+
+@keyframes picker-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes picker-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .picker-card,
+  .picker-skeleton,
+  .picker-check,
+  .picker-thumb img {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Scrollbars inside a long popover, kept unobtrusive. */
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.16) transparent;
+}
+.thin-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 0.16);
+  border-radius: 3px;
+}
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}

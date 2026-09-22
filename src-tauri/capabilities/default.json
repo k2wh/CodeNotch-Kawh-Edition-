@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the CodeNotch HUD window. The HUD is driven from Rust -- the webview only sends commands and listens for events -- so this grants the minimum: core defaults plus event plumbing. Window sizing and positioning deliberately stay on the Rust side, where the Win32 no-activate guarantees live.",
+  "windows": ["hud"],
+  "permissions": ["core:default", "core:event:default"]
+}
