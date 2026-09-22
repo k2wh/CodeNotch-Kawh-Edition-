@@ -120,6 +120,12 @@ pub fn dock(
     Ok(placement)
 }
 
+/// Only X11 hands a window's real position back; elsewhere the window is
+/// where it was put, and the caller's own record is the truth.
+pub fn window_origin(_handle: WindowHandle) -> Option<(i32, i32)> {
+    None
+}
+
 pub fn set_region(_handle: WindowHandle, _rect: Option<(i32, i32, i32, i32)>) -> Result<()> {
     Ok(())
 }

@@ -425,6 +425,24 @@ pub fn dock(
     ))
 }
 
+/// Where the window actually is, asked of the X server.
+///
+/// GTK answers this from what it last asked for, which is the one thing that
+/// can't be trusted here: when the window manager puts a window somewhere
+/// else, only the server knows. Root-relative, so it compares against a
+/// placement; the translate is what turns the window's own corner into it,
+/// frame and all.
+pub fn window_origin(handle: WindowHandle) -> Option<(i32, i32)> {
+    let (display, window) = own(handle)?;
+    let at = display
+        .conn
+        .translate_coordinates(window, display.root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    Some((at.dst_x.into(), at.dst_y.into()))
+}
+
 /// Clip the part of the window that takes clicks to what the webview drew.
 /// Unlike Windows' window region this leaves the drawing alone, but the rest
 /// is transparent anyway.

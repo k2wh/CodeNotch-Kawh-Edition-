@@ -789,6 +789,12 @@ pub fn dock(
     Ok(placement)
 }
 
+/// Only X11 hands a window's real position back; elsewhere the window is
+/// where it was put, and the caller's own record is the truth.
+pub fn window_origin(_handle: WindowHandle) -> Option<(i32, i32)> {
+    None
+}
+
 /// Clip the window to one rectangle (window-relative physical pixels), or
 /// lift the clip with `None`.
 ///

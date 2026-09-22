@@ -21,6 +21,21 @@ export interface Release {
 
 export const CHANGELOG: Release[] = [
   {
+    version: "0.2.3",
+    date: "2026-09-22",
+    changes: {
+      en: [
+        "On Linux the notch stays where it was put: changing its edge or size while it was running could leave it floating near the left edge, because the window manager refused the move and chose a spot of its own. It now reads its real position back from the display server and asks again.",
+      ],
+      pt: [
+        "No Linux o notch fica onde foi colocado: trocar a borda ou o tamanho com ele aberto podia deixá-lo flutuando perto da borda esquerda, porque o gerenciador de janelas recusava o movimento e escolhia outro lugar. Agora ele confere a posição real no servidor gráfico e pede de novo.",
+      ],
+      es: [
+        "En Linux el notch se queda donde se lo puso: cambiar su borde o su tamaño con él abierto podía dejarlo flotando junto al borde izquierdo, porque el gestor de ventanas rechazaba el movimiento y elegía un sitio propio. Ahora lee su posición real del servidor gráfico y la vuelve a pedir.",
+      ],
+    },
+  },
+  {
     version: "0.2.2",
     date: "2026-09-22",
     changes: {

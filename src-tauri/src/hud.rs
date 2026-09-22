@@ -203,6 +203,36 @@ pub struct Hud {
     native: std::sync::OnceLock<WindowHandle>,
 }
 
+/// Put the window back where it was asked to go, if it isn't there.
+///
+/// Where there is a display server to ask, it is asked: the toolkit answers
+/// this from the move it last made, which is the one answer that can't be
+/// checked against itself.
+#[cfg(not(windows))]
+fn hold_position_now(
+    window: &tauri::WebviewWindow,
+    handle: platform::WindowHandle,
+    placement: Placement,
+) {
+    use tauri::PhysicalPosition;
+    let at = match platform::window_origin(handle) {
+        Some(at) => at,
+        None => match window.outer_position() {
+            Ok(at) => (at.x, at.y),
+            Err(_) => return,
+        },
+    };
+    if at == (placement.x, placement.y) {
+        return;
+    }
+    tracing::debug!(
+        asked = ?(placement.x, placement.y),
+        landed = ?at,
+        "the window manager moved the notch; putting it back"
+    );
+    let _ = window.set_position(PhysicalPosition::new(placement.x, placement.y));
+}
+
 impl Hud {
     pub fn new(window: WebviewWindow, config: Config) -> Self {
         Self {
@@ -386,10 +416,18 @@ impl Hud {
                     placement.height.max(1) as u32,
                 ));
             }
-            if last.map(|p| (p.x, p.y)) != Some((placement.x, placement.y)) {
+            let moved = last.map(|p| (p.x, p.y)) != Some((placement.x, placement.y));
+            if moved {
                 let _ = self
                     .window
                     .set_position(PhysicalPosition::new(placement.x, placement.y));
+            }
+            // A window that changed size or place is the one a window manager
+            // is most likely to put somewhere of its own choosing.
+            if moved
+                || last.map(|p| (p.width, p.height)) != Some((placement.width, placement.height))
+            {
+                self.hold_position_briefly(placement);
             }
         }
 
@@ -411,6 +449,46 @@ impl Hud {
         let state = self.state();
         self.publish(state);
         Ok(())
+    }
+
+    /// Put the window back where it was asked to go, if it isn't there.
+    ///
+    /// A window manager may refuse a move that arrives while a resize is still
+    /// in flight, and the spot it picks instead is its own. Switching from the
+    /// bottom edge to the right asks a window as wide as the screen to sit
+    /// against the right edge, which would hang off it; the move is clamped to
+    /// the left, the resize lands afterwards, and the notch ends up floating
+    /// by the left edge — where a report of this came from, on GNOME.
+    ///
+    /// So the position is read back and said again, which costs nothing when
+    /// the window is already there. The next `tick` checks once more, for the
+    /// managers that place a window on their own schedule.
+    #[cfg(not(windows))]
+    fn hold_position(&self, placement: Placement) {
+        if let Some(handle) = self.handle() {
+            hold_position_now(&self.window, handle, placement);
+        }
+    }
+
+    /// Watch the spot for a moment after asking for it.
+    ///
+    /// The window manager answers a move and a resize in its own time, and the
+    /// one that loses is the move: the notch lands somewhere else and stays
+    /// there until the next poll, fifteen seconds away. These three look in
+    /// while it settles, so a change of edge is right by the time the eye
+    /// gets back to it.
+    #[cfg(not(windows))]
+    fn hold_position_briefly(&self, placement: Placement) {
+        let Some(handle) = self.handle() else {
+            return;
+        };
+        let window = self.window.clone();
+        tauri::async_runtime::spawn(async move {
+            for delay in [120u64, 400, 1200] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                hold_position_now(&window, handle, placement);
+            }
+        });
     }
 
     /// Clip the window to what the webview has drawn, so its transparent
@@ -673,6 +751,12 @@ impl Hud {
         };
         if let Some(handle) = self.handle() {
             self.restate_layer(handle, below);
+        }
+        // And stay where it was put: a window manager that moved the notch
+        // after the fact gets one poll to be right about it.
+        #[cfg(not(windows))]
+        if let Some(placement) = self.inner.lock().expect("hud lock").last_placement {
+            self.hold_position(placement);
         }
         // Re-assert the trim while resting: WebView2 drifts back to holding
         // things after activity, and the notch rests most of the time.

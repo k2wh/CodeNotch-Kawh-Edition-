@@ -1,6 +1,6 @@
 [package]
 name = "codenotch-core"
-version = "0.2.2"
+version = "0.2.3"
 description = "Platform-agnostic telemetry collection for CodeNotch"
 license = "MIT"
 edition = "2021"

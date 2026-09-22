@@ -15,6 +15,7 @@ copy of it. The named volumes keep Cargo's and npm's caches between runs.
 | `build.sh` | Builds the `.deb` and copies it to `/out`.                          | `/out`, caches        |
 | `try.sh`   | Installs that `.deb` on a virtual screen and checks the notch: window manager hints, where it sits, which clicks it takes, screenshots. | `/out`                |
 | `probe.sh` | Runs the X11 layer's live test against two xterms.                  | caches                |
+| `holds-its-place.sh` | Shoves the notch's window aside the way a window manager does, and checks that it goes back. | `/out` |
 | `check.sh` | Clippy and the unit tests, on Linux.                                | caches                |
 
 ```sh
