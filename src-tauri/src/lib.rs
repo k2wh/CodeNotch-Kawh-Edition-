@@ -11,6 +11,7 @@ pub mod hud;
 pub mod platform;
 pub mod poll;
 pub mod tray;
+pub mod update;
 pub mod webview;
 
 use std::sync::{Arc, Mutex};
@@ -138,6 +139,12 @@ pub fn run() {
                 app.exit(0);
                 return;
             }
+            // `codenotch.exe --update`: look for a release now, and install it.
+            if argv.iter().any(|arg| arg == "--update") {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { update::update_now(&app).await });
+                return;
+            }
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = commands::set_hidden_everywhere(&app, false).await;
@@ -147,6 +154,7 @@ pub fn run() {
             });
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::hud_ready,
             commands::hud_hover,
@@ -167,6 +175,10 @@ pub fn run() {
             commands::list_open_windows,
             commands::open_config_dir,
             commands::quit_app,
+            update::update_status,
+            update::update_check,
+            update::update_act,
+            update::update_dismiss,
         ])
         .setup(|app| {
             // `--quit` with nothing to quit: the single-instance plugin found
@@ -214,10 +226,14 @@ pub fn run() {
                 }
             });
 
+            let version = app.package_info().version.to_string();
+            let whats_new = update::first_launch_of_new_version(&version).then_some(version);
+
             app.manage(AppState {
                 hud: hud.clone(),
                 collector: Arc::new(AsyncMutex::new(Collector::new(config))),
                 latest: Arc::new(Mutex::new(Telemetry::empty())),
+                whats_new: Mutex::new(whats_new),
             });
 
             if let Err(err) = tray::build(&app.handle().clone()) {
@@ -226,6 +242,15 @@ pub fn run() {
             }
 
             poll::spawn(app.handle().clone());
+            update::spawn(app.handle().clone());
+            // `--update` with no other copy running: this one is the notch.
+            if std::env::args().any(|arg| arg == "--update") {
+                let app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    update::update_now(&app).await;
+                });
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

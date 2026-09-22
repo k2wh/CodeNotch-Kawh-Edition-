@@ -359,6 +359,17 @@ pub struct Config {
 
     /// Interface language: `auto` (follow Windows), `en`, `pt` or `es`.
     pub language: String,
+
+    /// New releases: `auto` looks for one and downloads it in the background,
+    /// `notify` only says there is one, `off` never asks. Installing always
+    /// waits for a click, whichever it is.
+    #[serde(default = "default_updates")]
+    pub updates: String,
+}
+
+/// Download in the background: installing still waits for the user.
+fn default_updates() -> String {
+    "auto".to_string()
 }
 
 impl Default for Config {
@@ -412,6 +423,8 @@ impl Default for Config {
             stay_below_apps: Vec::new(),
 
             language: "auto".to_string(),
+
+            updates: default_updates(),
         }
     }
 }
@@ -522,6 +535,9 @@ impl Config {
         }
         if !matches!(self.language.as_str(), "auto" | "en" | "pt" | "es") {
             self.language = "auto".to_string();
+        }
+        if !matches!(self.updates.as_str(), "auto" | "notify" | "off") {
+            self.updates = default_updates();
         }
         if !NOTIFY_SOUNDS.contains(&self.notify_sound_id.as_str()) {
             self.notify_sound_id = Config::default().notify_sound_id;
@@ -640,6 +656,19 @@ mod tests {
         assert_eq!(cfg.edge_offset, 1.0);
         assert_eq!(cfg.margin, 0.0);
         assert_eq!(cfg.peek_secs, 60);
+    }
+
+    #[test]
+    fn updates_download_in_the_background_unless_told_otherwise() {
+        // A config written before updates existed downloads them, like a new one.
+        let old: Config = serde_json::from_str(r#"{"edge":"right"}"#).unwrap();
+        assert_eq!(old.updates, "auto");
+        assert_eq!(Config::default().updates, "auto");
+
+        let off: Config = serde_json::from_str(r#"{"updates":"off"}"#).unwrap();
+        assert_eq!(off.sanitised().updates, "off");
+        let odd: Config = serde_json::from_str(r#"{"updates":"always"}"#).unwrap();
+        assert_eq!(odd.sanitised().updates, "auto");
     }
 
     #[test]

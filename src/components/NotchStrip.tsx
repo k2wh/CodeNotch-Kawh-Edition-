@@ -11,9 +11,10 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Settings2 } from "lucide-react";
 
 import { useI18n } from "../lib/i18n";
-import type { Edge, HudMetrics, ProviderSnapshot } from "../types";
+import type { Edge, HudMetrics, ProviderSnapshot, UpdateStatus } from "../types";
 import { NotchShape } from "./NotchShape";
 import { ProviderRing } from "./ProviderRing";
+import { UPDATE_KEY, UpdateRing, updateRingVisible } from "./UpdateRing";
 
 interface Props {
   providers: ProviderSnapshot[];
@@ -29,6 +30,10 @@ interface Props {
   pulseWaiting: boolean;
   onHover: (provider: ProviderSnapshot | null) => void;
   onActivate: (provider: ProviderSnapshot) => void;
+  /** A new release on its way or ready: one more ring, before the gear. */
+  update: UpdateStatus | null;
+  onHoverUpdate: () => void;
+  onActivateUpdate: () => void;
   onOpenSettings: () => void;
   /** Close whatever card is open without letting the notch collapse. */
   onDismissCard: () => void;
@@ -52,6 +57,9 @@ export function NotchStrip({
   pulseWaiting,
   onHover,
   onActivate,
+  update,
+  onHoverUpdate,
+  onActivateUpdate,
   onDragAlong,
   onOpenSettings,
   onDismissCard,
@@ -63,6 +71,7 @@ export function NotchStrip({
   const vertical = edge === "left" || edge === "right";
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [shell, setShell] = useState({ width: 0, height: 0 });
+  const showUpdate = updateRingVisible(update);
 
   // The silhouette is drawn at exact pixel size, so it has to follow the strip
   // as rings come and go.
@@ -77,7 +86,7 @@ export function NotchStrip({
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [vertical, metrics, providers.length]);
+  }, [vertical, metrics, providers.length, showUpdate]);
 
   // Alt and drag slides the notch along its edge. Alt because a plain drag
   // across the strip is how you get from one ring to the next.
@@ -167,6 +176,22 @@ export function NotchStrip({
             />
           </span>
         ))}
+
+        {showUpdate && update && (
+          <span
+            key={UPDATE_KEY}
+            className="ring-cell"
+            style={{ [vertical ? "height" : "width"]: metrics.slot }}
+          >
+            <UpdateRing
+              status={update}
+              size={metrics.ring}
+              active={activeId === UPDATE_KEY}
+              onHover={onHoverUpdate}
+              onActivate={onActivateUpdate}
+            />
+          </span>
+        )}
 
         {/* The strip is the whole UI, so settings live on it too. */}
         <button

@@ -6,6 +6,8 @@
 #
 # Needs the Xcode command line tools, Rust and Node.js 22 or newer; it says
 # which is missing and how to get it. Run from anywhere in the checkout.
+# Anything after it goes to `tauri build` (the release workflow adds the
+# updater's signed archive this way).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -29,7 +31,7 @@ fi
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
 npm ci --no-audit --no-fund
-npx tauri build --target universal-apple-darwin --bundles app,dmg
+npx tauri build --target universal-apple-darwin --bundles app,dmg "$@"
 
 bundle=src-tauri/target/universal-apple-darwin/release/bundle
 echo

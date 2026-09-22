@@ -18,11 +18,13 @@ import type {
   OpenWindow,
   ProviderId,
   Telemetry,
+  UpdateStatus,
 } from "../types";
 
 export const TELEMETRY_EVENT = "codenotch://telemetry";
 export const CONFIG_EVENT = "codenotch://config";
 export const HUD_STATE_EVENT = "codenotch://hud-state";
+export const UPDATE_EVENT = "codenotch://update";
 
 /** True when running inside the Tauri shell rather than a bare browser. */
 export const IN_TAURI =
@@ -74,6 +76,13 @@ export const ipc = {
   listOpenWindows: () => call<OpenWindow[]>("list_open_windows"),
   openConfigDir: () => call<void>("open_config_dir"),
   quit: () => call<void>("quit_app"),
+  updateStatus: () => call<UpdateStatus>("update_status"),
+  /** "Check now": resolves once the look is done. */
+  updateCheck: () => call<UpdateStatus>("update_check"),
+  /** The update ring's click: download, try again, or install and restart. */
+  updateAct: () => call<void>("update_act"),
+  /** "Later": hide the ring until the next look. */
+  updateDismiss: () => call<void>("update_dismiss"),
 };
 
 /** Subscribe to a backend event; returns an unsubscribe function. */
@@ -91,4 +100,6 @@ export const events = {
   config: (handler: (c: Config) => void) => subscribe<Config>(CONFIG_EVENT, handler),
   hudState: (handler: (s: HudState) => void) =>
     subscribe<HudState>(HUD_STATE_EVENT, handler),
+  update: (handler: (s: UpdateStatus) => void) =>
+    subscribe<UpdateStatus>(UPDATE_EVENT, handler),
 };

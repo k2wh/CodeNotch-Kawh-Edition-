@@ -27,6 +27,9 @@ pub struct AppState {
     /// Latest telemetry, so a reloading webview gets data without waiting for
     /// the next poll.
     pub latest: Arc<Mutex<Telemetry>>,
+    /// This launch is the first of a new version: the webview shows what
+    /// changed, once, and takes it from here.
+    pub whats_new: Mutex<Option<String>>,
 }
 
 /// The payload a freshly loaded webview needs to render immediately.
@@ -43,6 +46,9 @@ pub struct Bootstrap {
     pub version: String,
     /// False on non-Windows dev builds, where the Win32 layer is a no-op.
     pub native_window: bool,
+    /// The version to show "what's new" for: set on the first launch after an
+    /// update, and only in the first bootstrap of that launch.
+    pub whats_new: Option<String>,
 }
 
 /// Called once the webview has mounted.
@@ -58,6 +64,7 @@ pub fn hud_ready(state: State<'_, AppState>) -> Result<Bootstrap, String> {
         edge: state.hud.edge(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         native_window: cfg!(windows),
+        whats_new: state.whats_new.lock().ok().and_then(|mut w| w.take()),
     })
 }
 
@@ -126,10 +133,10 @@ pub async fn apply_config(app: &tauri::AppHandle, config: Config) -> Result<Conf
     // a setting silently revert on the next launch.
     config.save().map_err(|e| e.to_string())?;
 
-    // Only touch the Run key when the setting actually changed, not on every
-    // unrelated save.
+    // Only touch the Run key (the autostart entry on Linux, the launch agent on
+    // a Mac) when the setting actually changed, not on every unrelated save.
     let previous = state.hud.config();
-    if cfg!(windows) && previous.launch_at_login != config.launch_at_login {
+    if previous.launch_at_login != config.launch_at_login {
         platform::set_launch_at_login(config.launch_at_login).map_err(|e| e.to_string())?;
     }
 

@@ -221,6 +221,40 @@ export interface Config {
 
   /** "auto" (follow Windows), "en", "pt" or "es". */
   language?: string;
+
+  /** New releases: "auto" downloads them in the background, "notify" only
+   *  says there is one, "off" never looks. Installing waits for a click. */
+  updates?: UpdatesMode;
+}
+
+export type UpdatesMode = "auto" | "notify" | "off";
+
+/** Where an update stands. Mirrors `update::Phase` in Rust. */
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "ready"
+  | "installing"
+  | "failed";
+
+/** Mirrors `update::UpdateStatus` in Rust. */
+export interface UpdateStatus {
+  phase: UpdatePhase;
+  /** The version running now. */
+  current: string;
+  /** The release on offer, once one has been found. */
+  version: string | null;
+  /** Its release notes, as written on GitHub (Markdown). */
+  notes: string | null;
+  downloaded: number;
+  total: number | null;
+  error: string | null;
+  /** When the last look finished, RFC 3339. */
+  checkedAt: string | null;
+  /** "Later": the ring stays away until the next look. */
+  dismissed: boolean;
 }
 
 export interface Rect {
@@ -290,6 +324,9 @@ export interface Bootstrap {
   version: string;
   /** False on non-Windows dev builds, where the Win32 layer is a no-op. */
   nativeWindow: boolean;
+  /** Set on the first launch after an update: the version whose changes the
+   *  notch shows once, unprompted. */
+  whatsNew?: string | null;
 }
 
 /** Providers whose card can raise a real window when clicked. */

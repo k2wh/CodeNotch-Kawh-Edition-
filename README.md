@@ -120,6 +120,18 @@ Compared with the Windows port it started from:
   from a list of open windows with live thumbnails, sliding into the edge and
   back out.
 
+**Keeping itself up to date**
+
+- A ring of its own, in the accent colour, when a release is out: it fills as
+  the new version downloads in the background, and a click installs it and
+  brings the notch back. Nothing installs on its own.
+- Every download is checked against this project's signing key before it runs,
+  so a file that wasn't signed for this app is refused.
+- Settings say how updates arrive — downloaded, only announced, or never — and
+  can look for one now.
+- What changed, in the notch's own language, the first time a new version
+  opens, and from the version in settings afterwards.
+
 **Everywhere else**
 
 - Linux (X11) and macOS versions, as well as Windows.
@@ -202,7 +214,8 @@ above.
 The Linux and macOS versions reach the same goals their own way: EWMH hints and
 a SHAPE input region on X11, a non-activating `NSPanel` at the menu bar's level
 on a Mac. See [packaging/linux](packaging/linux/README.md) and
-[packaging/macos](packaging/macos/README.md).
+[packaging/macos](packaging/macos/README.md); how a release is built and signed
+is in [packaging/releasing.md](packaging/releasing.md).
 
 Clicking a provider card raises that tool's window via `SetForegroundWindow`,
 using the `AttachThreadInput` dance that Windows requires — without it the call
@@ -328,6 +341,7 @@ start).
 | `planUsd` | none | What a plan costs a month in US$, by provider: `{"claudeCode": 200}` |
 | `stayBelowFullscreen` / `stayBelowApps` | `false` / none | Stay behind full-screen apps, and behind these apps while they're in front |
 | `launchAtLogin` | `false` | Start at sign-in: a `Run` registry entry on Windows, an autostart entry on Linux, a launch agent on a Mac |
+| `updates` | `auto` | How a new release arrives: `auto` downloads it in the background, `notify` only says it's out, `off` never looks. Installing always waits for a click |
 | `poll.*` | 10–300s | Per-provider intervals, clamped to 5–3600s; Claude's is never under 300s |
 | `providers` | all `true` | Turn individual providers, or accounts, off |
 | `providerOrder` | all | The order of the rings |
@@ -363,8 +377,11 @@ scripts/                  Icon and test-fixture generators
 
 ## Privacy
 
-Everything runs on your machine. The only network calls CodeNotch makes are to
-each provider's own usage endpoint, with the login its tool already holds:
+Everything runs on your machine. CodeNotch asks GitHub for this project's
+latest release every six hours, which is the only request that isn't about a
+provider — `updates: "off"` in the settings stops it. Its other network calls
+are to each provider's own usage endpoint, with the login its tool already
+holds:
 Anthropic's for Claude Code, the Grok CLI's billing proxy, Z.ai or BigModel,
 Kimi, OpenCode, Command Code and MiniMax, only for the providers switched on
 and signed in. Ollama and LM Studio are asked on your own machine, or wherever

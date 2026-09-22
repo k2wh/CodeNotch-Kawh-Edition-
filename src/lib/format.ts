@@ -72,6 +72,41 @@ export function formatBytes(bytes: number): string {
   return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
+/**
+ * The first paragraph of a release's notes, as plain text.
+ *
+ * The notes are the GitHub release's Markdown; the card only has room for what
+ * they lead with, so headings are skipped and links, emphasis and code marks
+ * are reduced to their words.
+ */
+export function summariseNotes(markdown: string | null, max = 240): string | null {
+  if (!markdown) return null;
+  const paragraph: string[] = [];
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      if (paragraph.length) break;
+      continue;
+    }
+    if (line.startsWith("#") || line.startsWith("```")) {
+      if (paragraph.length) break;
+      continue;
+    }
+    paragraph.push(line.replace(/^[-*+]\s+/, ""));
+  }
+  const text = paragraph
+    .join(" ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return null;
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
 /** The headline value for a window: a percentage if there is one, else counts. */
 export function windowValue(window: UsageWindow): string {
   const prefix = window.estimated ? "~" : "";

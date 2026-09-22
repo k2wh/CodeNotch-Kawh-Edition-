@@ -13,13 +13,24 @@ import {
   FolderOpen,
   GripVertical,
   Power,
+  RefreshCw,
   Volume2,
 } from "lucide-react";
 
+import { formatAgo, formatPct } from "../lib/format";
 import { LANGUAGES, useI18n, type LanguageSetting } from "../lib/i18n";
 import { ipc } from "../lib/ipc";
 import { playSound, SOUND_IDS } from "../lib/sounds";
-import type { Config, Edge, HudSize, MonitorInfo, ProviderId } from "../types";
+import type {
+  Config,
+  Edge,
+  HudSize,
+  MonitorInfo,
+  ProviderId,
+  UpdatesMode,
+  UpdateStatus,
+} from "../types";
+import { downloadFraction } from "./UpdateRing";
 import { appLabel, WindowPicker } from "./WindowPicker";
 
 /**
@@ -101,6 +112,13 @@ interface Props {
   rings: ProviderRow[];
   monitors: MonitorInfo[];
   version: string;
+  /** Where a new release stands, for the updates row. */
+  update: UpdateStatus | null;
+  onCheckUpdates: () => void;
+  onUpdateAct: () => void;
+  /** This build carries notes for the version it is: offer them beside it. */
+  hasWhatsNew: boolean;
+  onWhatsNew: () => void;
   onChange: (config: Config) => void;
   onClose: () => void;
   onOpenConfigDir: () => void;
@@ -811,6 +829,113 @@ function AgentHooksRow() {
 }
 
 /**
+ * How new releases arrive, where the last look left things, and a way to look
+ * now. Installing is never a setting: it always waits for a click on the
+ * update ring.
+ */
+function UpdatesRow({
+  mode,
+  status,
+  onMode,
+  onCheck,
+  onAct,
+}: {
+  mode: UpdatesMode;
+  status: UpdateStatus | null;
+  onMode: (mode: UpdatesMode) => void;
+  onCheck: () => void;
+  /** Download what was found, or install what is ready: the ring's click,
+   *  here too, since "later" takes the ring away. */
+  onAct: () => void;
+}) {
+  const { t } = useI18n();
+  const version = status?.version ?? "";
+  const fraction = status ? downloadFraction(status) : null;
+
+  let line: string;
+  switch (status?.phase) {
+    case "checking":
+      line = t("settings.updatesChecking");
+      break;
+    case "available":
+      line = t("settings.updatesFound", { version });
+      break;
+    case "downloading":
+      line = t("settings.updatesDownloading", {
+        version,
+        pct: fraction === null ? "" : formatPct(fraction * 100),
+      }).trim();
+      break;
+    case "ready":
+      line = t("settings.updatesReady", { version });
+      break;
+    case "installing":
+      line = t("update.card.installing");
+      break;
+    case "failed":
+      line = t("settings.updatesFailed");
+      break;
+    default: {
+      const ago = formatAgo(status?.checkedAt ?? null, t);
+      line = ago ? t("settings.updatesUpToDate", { ago }) : t("settings.updatesNotChecked");
+    }
+  }
+  const busy = status?.phase === "checking";
+  // What the button does: with a release in hand, the step it's waiting for;
+  // otherwise, look for one.
+  const act =
+    status?.phase === "ready"
+      ? t("update.card.restart")
+      : status?.phase === "available"
+        ? t("update.card.download")
+        : null;
+
+  return (
+    <>
+      <Row label={t("settings.updates")}>
+        <SegmentedControl<UpdatesMode>
+          value={mode}
+          options={[
+            { value: "auto", label: t("settings.updatesAuto") },
+            { value: "notify", label: t("settings.updatesNotify") },
+            { value: "off", label: t("settings.updatesOff") },
+          ]}
+          onChange={onMode}
+        />
+      </Row>
+      <div className="flex items-center justify-between gap-2 pb-1">
+        <span
+          className="tnum min-w-0 text-[9.5px] leading-snug text-notch-faint"
+          title={status?.error ?? undefined}
+        >
+          {line}
+        </span>
+        {act ? (
+          <button
+            type="button"
+            onClick={onAct}
+            className="shrink-0 cursor-pointer rounded-md bg-[var(--accent)] px-2 py-[3px] text-[10px] font-semibold text-black transition-[filter] hover:brightness-110"
+          >
+            {act}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onCheck}
+            disabled={busy || status?.phase === "downloading" || status?.phase === "installing"}
+            className="flex shrink-0 cursor-pointer items-center gap-1 rounded-md bg-white/6 px-2 py-[3px] text-[10px] text-notch-muted transition-colors hover:bg-white/12 hover:text-notch-text disabled:cursor-default disabled:opacity-50"
+          >
+            <RefreshCw className={`size-3 ${busy ? "activity-spin" : ""}`} aria-hidden />
+            {t("settings.updatesCheck")}
+          </button>
+        )}
+      </div>
+      <p className="pb-1 text-[9.5px] leading-snug text-notch-faint">{t("settings.updatesHint")}</p>
+    </>
+  );
+}
+
+/**
  * Which apps the notch stays behind instead of floating over. The apps
  * themselves are chosen in the window picker, from live thumbnails.
  */
@@ -904,6 +1029,11 @@ export function SettingsPanel({
   rings,
   monitors,
   version,
+  update,
+  onCheckUpdates,
+  onUpdateAct,
+  hasWhatsNew,
+  onWhatsNew,
   onChange,
   onClose,
   onOpenConfigDir,
@@ -982,6 +1112,15 @@ export function SettingsPanel({
           <ArrowLeft className="size-3" />
         </button>
         <span className="flex-1 text-[12px] font-medium">{t("settings.title")}</span>
+        {hasWhatsNew && (
+          <button
+            type="button"
+            onClick={onWhatsNew}
+            className="cursor-pointer rounded px-1 py-[1px] text-[9px] text-[var(--accent)] transition-colors hover:bg-white/8"
+          >
+            {t("whatsNew.link")}
+          </button>
+        )}
         <span className="tnum text-[9px] text-notch-faint">v{version}</span>
       </div>
 
@@ -1159,6 +1298,15 @@ export function SettingsPanel({
                 />
                   </>
                 )}
+            {key === "launchAtLogin" && (
+              <UpdatesRow
+                mode={config.updates ?? "auto"}
+                status={update}
+                onMode={(updates) => patch({ updates })}
+                onCheck={onCheckUpdates}
+                onAct={onUpdateAct}
+              />
+            )}
               </div>
             ))}
             <div className="my-1 h-px bg-white/8" />

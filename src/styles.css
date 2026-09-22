@@ -245,6 +245,101 @@ body {
   line-height: 1;
 }
 
+/* --- The update ring and its card --------------------------------------- */
+
+/* What a click on the update ring does, where a provider has its weekly line. */
+.ring-update-label {
+  margin-top: -4px;
+  color: var(--ink-dim);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  animation: ring-rise-in 420ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: 280ms;
+}
+.update-mark[data-failed] {
+  color: var(--tone-bad);
+}
+
+.update-card-mark {
+  color: var(--accent);
+}
+.update-progress {
+  margin-top: 10px;
+}
+.update-fill {
+  background: var(--accent);
+}
+.update-notes {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-dim);
+}
+.update-error {
+  color: var(--tone-bad);
+}
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* One line per change, marked with a dash rather than a bullet: the card is
+   narrow and a wrapped line should read as one item. */
+.whats-new-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-dim);
+}
+.whats-new-list li {
+  padding-left: 11px;
+  text-indent: -11px;
+}
+.whats-new-list li::before {
+  content: "— ";
+  color: var(--accent);
+}
+.update-primary {
+  flex: 1;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--accent);
+  /* Legible on any accent: the strip's black, not a guess at contrast. */
+  color: #000;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 140ms ease;
+}
+.update-primary:hover {
+  filter: brightness(1.12);
+}
+.update-later {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: rgb(255 255 255 / 0.06);
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.update-later:hover {
+  background: rgb(255 255 255 / 0.1);
+  color: var(--ink);
+}
+
 /* --- The detail popover ------------------------------------------------- */
 
 /*
@@ -560,6 +655,13 @@ body {
 }
 .ring-disc[data-attention="answered"]::after {
   --halo: var(--tone-low);
+}
+/* An update is ready: a few slower pulses in the accent colour, then the full
+   ring alone says it. It waits for a click, not for an answer. */
+.ring-disc[data-attention="update"]::after {
+  --halo: var(--accent);
+  animation-duration: 2.4s;
+  animation-iteration-count: 5;
 }
 
 @keyframes attention-halo {

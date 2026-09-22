@@ -7,7 +7,9 @@
  * signed-out provider and one that isn't installed.
  */
 
-import type { Bootstrap, Config, HudMetrics, Telemetry } from "../types";
+import { useCallback, useEffect, useState } from "react";
+
+import type { Bootstrap, Config, HudMetrics, Telemetry, UpdateStatus } from "../types";
 
 const now = Date.now();
 const iso = (offsetMs: number) => new Date(now + offsetMs).toISOString();
@@ -381,10 +383,100 @@ export const DEMO_BOOTSTRAP: Bootstrap = {
     hidden: false,
     peeking: false,
     width: DEMO_METRICS.stripThickness,
-    height: DEMO_METRICS.stripPadding * 2 + 5 * DEMO_METRICS.slot,
+    // Room for the demo's rings, the update ring and the gear.
+    height:
+      DEMO_METRICS.stripPadding * 2 +
+      (DEMO_TELEMETRY.providers.filter((p) => p.health !== "unavailable").length + 1) *
+        DEMO_METRICS.slot +
+      30,
   },
   metrics: DEMO_METRICS,
   edge: "right",
-  version: "0.1.0-demo",
+  // A version the changelog has notes for, so the browser shows the card a
+  // first launch after an update would.
+  version: "0.2.0",
   nativeWindow: false,
+  whatsNew: "0.2.0",
 };
+
+/** The pretend release the demo downloads. */
+const DEMO_RELEASE = {
+  version: "0.2.1",
+  total: 6_400_000,
+  notes:
+    "The notch updates itself: a new ring downloads the next version in the background, and a click installs it.\n\n## Install\n\n- Windows…",
+};
+
+const DEMO_IDLE: UpdateStatus = {
+  phase: "idle",
+  current: "0.2.0",
+  version: null,
+  notes: null,
+  downloaded: 0,
+  total: null,
+  error: null,
+  checkedAt: null,
+  dismissed: false,
+};
+
+/**
+ * A release playing through every step in a bare browser: found a moment
+ * after the page opens, downloaded over a few seconds, ready, and installed
+ * on a click, the way the backend would report them.
+ */
+export function useDemoUpdate(enabled: boolean): {
+  status: UpdateStatus | null;
+  act: () => void;
+  later: () => void;
+} {
+  const [status, setStatus] = useState<UpdateStatus | null>(enabled ? DEMO_IDLE : null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const found = window.setTimeout(() => {
+      setStatus({
+        ...DEMO_IDLE,
+        phase: "downloading",
+        version: DEMO_RELEASE.version,
+        notes: DEMO_RELEASE.notes,
+        total: DEMO_RELEASE.total,
+      });
+    }, 1500);
+    return () => window.clearTimeout(found);
+  }, [enabled]);
+
+  const downloading = status?.phase === "downloading";
+  useEffect(() => {
+    if (!downloading) return;
+    const timer = window.setInterval(() => {
+      setStatus((current) => {
+        if (!current || current.phase !== "downloading") return current;
+        const downloaded = Math.min(DEMO_RELEASE.total, current.downloaded + 160_000);
+        return downloaded >= DEMO_RELEASE.total
+          ? { ...current, phase: "ready", downloaded }
+          : { ...current, downloaded };
+      });
+    }, 150);
+    return () => window.clearInterval(timer);
+  }, [downloading]);
+
+  const act = useCallback(() => {
+    setStatus((current) =>
+      current?.phase === "ready" ? { ...current, phase: "installing" } : current,
+    );
+  }, []);
+
+  // The app would close here and come back as the new version.
+  const installing = status?.phase === "installing";
+  useEffect(() => {
+    if (!installing) return;
+    const done = window.setTimeout(() => setStatus(DEMO_IDLE), 2500);
+    return () => window.clearTimeout(done);
+  }, [installing]);
+
+  const later = useCallback(() => {
+    setStatus((current) => (current ? { ...current, dismissed: true } : current));
+  }, []);
+
+  return { status, act, later };
+}

@@ -23,8 +23,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { NotchStrip } from "./components/NotchStrip";
 import { PROVIDER_ROWS, SettingsPanel, type ProviderRow } from "./components/SettingsPanel";
+import { UpdatePopover } from "./components/UpdatePopover";
+import { UPDATE_KEY, updateRingVisible } from "./components/UpdateRing";
 import { UsagePopover } from "./components/UsagePopover";
-import { DEMO_BOOTSTRAP } from "./lib/demo";
+import { WhatsNewPopover } from "./components/WhatsNewPopover";
+import { changesFor, type Release } from "./lib/changelog";
+import { DEMO_BOOTSTRAP, useDemoUpdate } from "./lib/demo";
 import { blockedUntil } from "./lib/format";
 import { I18nProvider, resolveLang } from "./lib/i18n";
 import { events, IN_TAURI, ipc } from "./lib/ipc";
@@ -39,6 +43,7 @@ import type {
   Rect,
   Session,
   Telemetry,
+  UpdateStatus,
 } from "./types";
 
 /** Grace period before closing, so a passing pointer doesn't toggle it. */
@@ -54,7 +59,11 @@ const LEAVE_MS = 140;
 const ANSWERED_PULSE_MS = 9000;
 
 /** What the popover slot is showing. */
-type Card = { kind: "provider"; provider: ProviderSnapshot } | { kind: "settings" };
+type Card =
+  | { kind: "provider"; provider: ProviderSnapshot }
+  | { kind: "update"; status: UpdateStatus }
+  | { kind: "whatsNew"; release: Release }
+  | { kind: "settings" };
 
 /**
  * Keep the last card on screen for its exit animation after it is dismissed,
@@ -94,8 +103,22 @@ export default function App() {
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [liveUpdate, setUpdate] = useState<UpdateStatus | null>(null);
+  // In a bare browser there is no backend: a pretend release plays through
+  // every step, so the ring can be worked on without publishing one.
+  const demoUpdate = useDemoUpdate(!IN_TAURI);
+  const update = IN_TAURI ? liveUpdate : demoUpdate.status;
+  const showUpdate = updateRingVisible(update);
+  // What changed, shown once on the first launch of a new version and from
+  // the version in settings afterwards.
+  const [whatsNew, setWhatsNew] = useState<string | null>(
+    IN_TAURI ? null : (DEMO_BOOTSTRAP.whatsNew ?? null),
+  );
+  const news = useMemo(() => changesFor(whatsNew), [whatsNew]);
 
   const closeTimer = useRef<number | null>(null);
+  /** Whether the notch was open on the last render; see the effect below. */
+  const wasOpen = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
@@ -128,9 +151,11 @@ export default function App() {
 
   const card: Card | null = useMemo(() => {
     if (showSettings) return { kind: "settings" };
+    if (activeId === UPDATE_KEY && update && showUpdate) return { kind: "update", status: update };
     if (active) return { kind: "provider", provider: active };
+    if (news) return { kind: "whatsNew", release: news };
     return null;
-  }, [showSettings, active]);
+  }, [showSettings, activeId, update, showUpdate, active, news]);
   const { shown, leaving } = usePresence(card);
 
   // --- Bootstrap and subscriptions ---------------------------------------
@@ -146,7 +171,15 @@ export default function App() {
       setMetrics(bootstrap.metrics);
       setEdge(bootstrap.edge);
       setVersion(bootstrap.version);
+      // First launch of a new version: say what changed, and open the notch
+      // for long enough to read it.
+      if (bootstrap.whatsNew && changesFor(bootstrap.whatsNew)) {
+        setWhatsNew(bootstrap.whatsNew);
+        void ipc.peek(20);
+      }
     });
+    // A reloaded webview picks up an update already under way.
+    ipc.updateStatus().then((status) => !cancelled && status && setUpdate(status));
 
     const unsubscribers = [
       events.telemetry(setTelemetry),
@@ -161,6 +194,7 @@ export default function App() {
         ipc.getMetrics().then((m) => m && setMetrics(m));
       }),
       events.hudState(setHud),
+      events.update(setUpdate),
     ];
 
     return () => {
@@ -176,10 +210,15 @@ export default function App() {
   // The backend closed the notch (peek expired, cursor left): drop the popover
   // so the two sides don't disagree about what is on screen.
   useEffect(() => {
-    if (!hud.open) {
+    // On the way closed, not on the way in: a card the notch opens itself for
+    // (what's new) is set before the backend reports the notch open, and
+    // clearing on mount would take it away in the same breath.
+    if (wasOpen.current && !hud.open) {
       setActiveId(null);
       setShowSettings(false);
+      setWhatsNew(null);
     }
+    wasOpen.current = hud.open;
   }, [hud.open]);
 
   // --- Attention ----------------------------------------------------------
@@ -284,6 +323,7 @@ export default function App() {
     if (provider) {
       setActiveId(provider.key);
       setShowSettings(false);
+      setWhatsNew(null);
       // Reading a ring's card is seeing it: its pulse can stop.
       setAnswered((current) => current.filter((key) => key !== provider.key));
       void ipc.hover(true);
@@ -294,6 +334,28 @@ export default function App() {
       void ipc.hover(false);
     }, CLOSE_DELAY_MS);
   }, []);
+
+  const handleHoverUpdate = useCallback(() => {
+    clearCloseTimer();
+    setActiveId(UPDATE_KEY);
+    setShowSettings(false);
+    setWhatsNew(null);
+    void ipc.hover(true);
+  }, []);
+
+  // A click on the update ring, or its card's button: download, try again, or
+  // install and restart, whichever the step calls for.
+  const { act: demoAct, later: demoLater } = demoUpdate;
+  const handleUpdateAct = useCallback(() => {
+    if (IN_TAURI) void ipc.updateAct();
+    else demoAct();
+  }, [demoAct]);
+
+  const handleUpdateLater = useCallback(() => {
+    setActiveId(null);
+    if (IN_TAURI) void ipc.updateDismiss();
+    else demoLater();
+  }, [demoLater]);
 
   useEffect(() => clearCloseTimer, []);
 
@@ -404,7 +466,7 @@ export default function App() {
     observer.observe(strip);
     if (popoverRef.current) observer.observe(popoverRef.current);
     return () => observer.disconnect();
-  }, [vertical, edge, metrics, rings.length, shown, telemetry, stripStart, popoverStart]);
+  }, [vertical, edge, metrics, rings.length, showUpdate, shown, telemetry, stripStart, popoverStart]);
 
   useEffect(() => {
     if (!showSettings) return;
@@ -429,7 +491,7 @@ export default function App() {
         ? discBox.top + discBox.height / 2
         : discBox.left + discBox.width / 2,
     );
-  }, [activeId, vertical, metrics, rings.length, telemetry, stripStart, leaving]);
+  }, [activeId, vertical, metrics, rings.length, showUpdate, telemetry, stripStart, leaving]);
 
   // --- Actions ------------------------------------------------------------
 
@@ -532,6 +594,18 @@ export default function App() {
               thickness={metrics.stripThickness}
               onFocusProvider={handleFocusProvider}
             />
+          ) : shown.kind === "whatsNew" ? (
+            <WhatsNewPopover release={shown.release} onClose={() => setWhatsNew(null)} />
+          ) : shown.kind === "update" ? (
+            <UpdatePopover
+              // The live status, so the progress moves while the card is open.
+              status={update ?? shown.status}
+              edge={edge}
+              anchor={tailOffset}
+              thickness={metrics.stripThickness}
+              onAct={handleUpdateAct}
+              onLater={handleUpdateLater}
+            />
           ) : (
             <div className="popover popover-flush">
               <SettingsPanel
@@ -539,6 +613,14 @@ export default function App() {
                 rings={settingsRings}
                 monitors={monitors}
                 version={version}
+                update={update}
+                onCheckUpdates={() => void ipc.updateCheck()}
+                onUpdateAct={handleUpdateAct}
+                hasWhatsNew={changesFor(version) !== null}
+                onWhatsNew={() => {
+                  setShowSettings(false);
+                  setWhatsNew(version);
+                }}
                 onChange={handleConfigChange}
                 onClose={() => setShowSettings(false)}
                 onOpenConfigDir={() => void ipc.openConfigDir()}
@@ -565,9 +647,13 @@ export default function App() {
           pulseWaiting={config.notifyPulse ?? true}
           onHover={handleHover}
           onActivate={handleActivate}
+          update={update}
+          onHoverUpdate={handleHoverUpdate}
+          onActivateUpdate={handleUpdateAct}
           onOpenSettings={() => {
             clearCloseTimer();
             setActiveId(null);
+            setWhatsNew(null);
             setShowSettings((open) => !open);
             void ipc.hover(true);
           }}

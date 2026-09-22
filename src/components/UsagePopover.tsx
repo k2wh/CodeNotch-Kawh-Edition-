@@ -46,7 +46,7 @@ const TAIL_HALF = 0.33;
 const TAIL_CONTROL = 0.46;
 
 /** The tail as an SVG, pointing away from the card towards the strip. */
-function Tail({ edge, thickness }: { edge: Edge; thickness: number }) {
+export function Tail({ edge, thickness }: { edge: Edge; thickness: number }) {
   const length = Math.round(thickness * TAIL_LENGTH);
   const half = Math.round(thickness * TAIL_HALF);
   const c = half * (1 - TAIL_CONTROL);
