@@ -942,14 +942,19 @@ function UpdatesRow({
 function StayBehindSection({
   fullscreen,
   apps,
+  passive,
   onFullscreen,
   onApps,
+  onPassive,
   onOpenPicker,
 }: {
   fullscreen: boolean;
   apps: string[];
+  /** Over a full-screen app it stays on top of: only show, take no clicks. */
+  passive: boolean;
   onFullscreen: (value: boolean) => void;
   onApps: (value: string[]) => void;
+  onPassive: (value: boolean) => void;
   onOpenPicker: () => void;
 }) {
   const { t } = useI18n();
@@ -959,6 +964,23 @@ function StayBehindSection({
       <Row label={t("settings.fullscreen")}>
         <Toggle label={t("settings.fullscreen")} checked={fullscreen} onChange={onFullscreen} />
       </Row>
+      {/* The other way to live with a game: stay on top of it, and keep your
+          hands off it. Dimmed while the notch hides behind games anyway. */}
+      <div
+        data-disabled={fullscreen || undefined}
+        className="transition-opacity data-disabled:pointer-events-none data-disabled:opacity-40"
+      >
+        <Row label={t("settings.passiveOverFullscreen")}>
+          <Toggle
+            label={t("settings.passiveOverFullscreen")}
+            checked={passive}
+            onChange={onPassive}
+          />
+        </Row>
+        <p className="pb-1 text-[9.5px] leading-snug text-notch-faint">
+          {t("settings.passiveOverFullscreenHint")}
+        </p>
+      </div>
       <Row label={t("settings.specificApps")}>
         <button
           type="button"
@@ -1316,8 +1338,10 @@ export function SettingsPanel({
         <StayBehindSection
           fullscreen={config.stayBelowFullscreen ?? false}
           apps={config.stayBelowApps ?? []}
+          passive={config.passiveOverFullscreen ?? true}
           onFullscreen={(stayBelowFullscreen) => patch({ stayBelowFullscreen })}
           onApps={(stayBelowApps) => patch({ stayBelowApps })}
+          onPassive={(passiveOverFullscreen) => patch({ passiveOverFullscreen })}
           onOpenPicker={() => setView("picker")}
         />
 

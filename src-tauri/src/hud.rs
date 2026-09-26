@@ -142,6 +142,10 @@ struct Inner {
     /// time to play. Dropping the window at once would hide the animation
     /// behind the very thing the notch is getting out of the way of.
     tucking: Option<WindowHandle>,
+    /// A full-screen app is in front and the notch is only there to be seen
+    /// (`passive_over_fullscreen`): it doesn't open under the pointer and
+    /// every click goes through to whatever is underneath.
+    passive: bool,
 }
 
 impl Inner {
@@ -254,6 +258,7 @@ impl Hud {
                 last_area: None,
                 below: None,
                 tucking: None,
+                passive: false,
             }),
         }
     }
@@ -383,7 +388,10 @@ impl Hud {
 
         // Clicks only pass through while the notch is resting; an open popover
         // has things on it to click.
-        let click_through = !open && config.click_through_when_collapsed;
+        // Over a game or a video it takes none at all, open or not: a peek is
+        // there to be read, and a click is the game's.
+        let passive = self.inner.lock().expect("hud lock").passive;
+        let click_through = passive || (!open && config.click_through_when_collapsed);
         platform::set_click_through(handle, click_through)?;
 
         let area = platform::work_area_for(monitor)
@@ -531,6 +539,11 @@ impl Hud {
         {
             let mut inner = self.inner.lock().expect("hud lock");
             if inner.hovering == hovering {
+                return Ok(());
+            }
+            // Only there to be seen: a game cursor crossing the notch doesn't
+            // open it.
+            if hovering && inner.passive {
                 return Ok(());
             }
             inner.hovering = hovering;
@@ -777,7 +790,7 @@ impl Hud {
     /// Decide whether to stay behind the app in front, per the user's list and
     /// the full-screen switch. Runs a few times a second from the tracker.
     pub fn check_foreground(&self) -> Result<()> {
-        let (fullscreen_rule, apps, current, interactive) = {
+        let (fullscreen_rule, apps, current, interactive, passive_rule, was_passive) = {
             let inner = self.inner.lock().expect("hud lock");
             if inner.config.hidden {
                 return Ok(());
@@ -787,10 +800,34 @@ impl Hud {
                 inner.config.stay_below_apps.clone(),
                 inner.below,
                 inner.interactive,
+                inner.config.passive_over_fullscreen,
+                inner.passive,
             )
         };
 
-        let target = match platform::foreground() {
+        let foreground = platform::foreground();
+
+        // A game or a video full screen in front, with the notch kept over it
+        // to be watched: hands off. Someone else's window only — the notch's
+        // own settings being in front is the user reaching for it.
+        let passive = passive_rule
+            && foreground
+                .as_ref()
+                .is_some_and(|fg| fg.fullscreen && fg.pid != std::process::id());
+        if passive != was_passive {
+            {
+                let mut inner = self.inner.lock().expect("hud lock");
+                inner.passive = passive;
+                if passive {
+                    // A card the game cursor opened on its way past closes.
+                    inner.hovering = false;
+                    inner.outside_since = None;
+                }
+            }
+            self.apply()?;
+        }
+
+        let target = match foreground {
             // Our own window (a settings field being edited) never counts, and
             // while the user is editing one the notch stays where it is.
             Some(fg) if fg.pid != std::process::id() && !interactive => {

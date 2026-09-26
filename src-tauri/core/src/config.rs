@@ -356,6 +356,15 @@ pub struct Config {
     /// Executables (e.g. `chrome.exe`) the notch stays behind while they are
     /// the foreground app. Matched case-insensitively.
     pub stay_below_apps: Vec<String>,
+    /// While a full-screen app is in front and the notch stays over it, only
+    /// show: no opening under the pointer, and every click goes through to
+    /// the game or video. Rings, pulses and chimes carry on.
+    ///
+    /// For someone who keeps the notch up to see when an agent finishes, and
+    /// whose game cursor keeps crossing it — a right-click that lands on the
+    /// notch instead of the game is a move the game never got.
+    #[serde(default = "default_passive_over_fullscreen")]
+    pub passive_over_fullscreen: bool,
 
     /// Interface language: `auto` (follow Windows), `en`, `pt` or `es`.
     pub language: String,
@@ -370,6 +379,11 @@ pub struct Config {
 /// Download in the background: installing still waits for the user.
 fn default_updates() -> String {
     "auto".to_string()
+}
+
+/// On: a click meant for a game should reach the game.
+fn default_passive_over_fullscreen() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -421,6 +435,7 @@ impl Default for Config {
             // Opt-in: people keep the notch up to watch limits while gaming.
             stay_below_fullscreen: false,
             stay_below_apps: Vec::new(),
+            passive_over_fullscreen: default_passive_over_fullscreen(),
 
             language: "auto".to_string(),
 
@@ -669,6 +684,17 @@ mod tests {
         assert_eq!(off.sanitised().updates, "off");
         let odd: Config = serde_json::from_str(r#"{"updates":"always"}"#).unwrap();
         assert_eq!(odd.sanitised().updates, "auto");
+    }
+
+    #[test]
+    fn games_get_their_clicks_unless_told_otherwise() {
+        // A config written before the switch existed lets clicks through too.
+        let old: Config = serde_json::from_str(r#"{"stayBelowFullscreen":false}"#).unwrap();
+        assert!(old.passive_over_fullscreen);
+        assert!(Config::default().passive_over_fullscreen);
+
+        let off: Config = serde_json::from_str(r#"{"passiveOverFullscreen":false}"#).unwrap();
+        assert!(!off.passive_over_fullscreen);
     }
 
     #[test]

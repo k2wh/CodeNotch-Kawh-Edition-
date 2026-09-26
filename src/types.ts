@@ -218,6 +218,9 @@ export interface Config {
   stayBelowFullscreen: boolean;
   /** Executables (e.g. `chrome.exe`) the notch stays behind while in front. */
   stayBelowApps: string[];
+  /** Over a full-screen app it stays on top of: don't open under the pointer,
+   *  and let every click through to the game or video. */
+  passiveOverFullscreen?: boolean;
 
   /** "auto" (follow Windows), "en", "pt" or "es". */
   language?: string;

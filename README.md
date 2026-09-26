@@ -340,6 +340,7 @@ start).
 | `estimateTokens` | `true` | Token counts and window sizes, and with `planUsd`, what a plan returns |
 | `planUsd` | none | What a plan costs a month in US$, by provider: `{"claudeCode": 200}` |
 | `stayBelowFullscreen` / `stayBelowApps` | `false` / none | Stay behind full-screen apps, and behind these apps while they're in front |
+| `passiveOverFullscreen` | `true` | Over a full-screen app the notch stays on top of: don't open under the pointer, and let every click through to it |
 | `launchAtLogin` | `false` | Start at sign-in: a `Run` registry entry on Windows, an autostart entry on Linux, a launch agent on a Mac |
 | `updates` | `auto` | How a new release arrives: `auto` downloads it in the background, `notify` only says it's out, `off` never looks. Installing always waits for a click |
 | `poll.*` | 10–300s | Per-provider intervals, clamped to 5–3600s; Claude's is never under 300s |

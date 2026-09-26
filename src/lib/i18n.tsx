@@ -87,6 +87,9 @@ const en = {
   "settings.updatesFailed": "Couldn't check for updates",
   "settings.stayBehind": "Stay behind",
   "settings.fullscreen": "Full-screen games & videos",
+  "settings.passiveOverFullscreen": "Just show over games & videos",
+  "settings.passiveOverFullscreenHint":
+    "While a full-screen app is in front, the notch stays visible but doesn't open under the pointer, and every click goes to the game or video. Rings, pulses and chimes carry on.",
   "settings.specificApps": "Specific apps",
   "settings.choose": "Choose",
   "settings.chosen": "{n} chosen",
@@ -246,6 +249,9 @@ const pt: Dict = {
   "settings.updatesFailed": "Não deu para verificar",
   "settings.stayBehind": "Ficar atrás",
   "settings.fullscreen": "Jogos e vídeos em tela cheia",
+  "settings.passiveOverFullscreen": "Só mostrar sobre jogos e vídeos",
+  "settings.passiveOverFullscreenHint":
+    "Com um app em tela cheia na frente, o notch continua visível, mas não abre com o mouse e todos os cliques vão para o jogo ou o vídeo. Os anéis, o pulso e os avisos sonoros continuam.",
   "settings.specificApps": "Apps específicos",
   "settings.choose": "Escolher",
   "settings.chosen": "{n} escolhidos",
@@ -402,6 +408,9 @@ const es: Dict = {
   "settings.updatesFailed": "No se pudo comprobar",
   "settings.stayBehind": "Quedarse detrás",
   "settings.fullscreen": "Juegos y vídeos a pantalla completa",
+  "settings.passiveOverFullscreen": "Solo mostrar sobre juegos y vídeos",
+  "settings.passiveOverFullscreenHint":
+    "Con una app a pantalla completa delante, el notch sigue visible, pero no se abre con el ratón y todos los clics van al juego o al vídeo. Los anillos, el pulso y los avisos sonoros siguen.",
   "settings.specificApps": "Apps concretas",
   "settings.choose": "Elegir",
   "settings.chosen": "{n} elegidas",

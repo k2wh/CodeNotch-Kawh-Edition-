@@ -21,6 +21,24 @@ export interface Release {
 
 export const CHANGELOG: Release[] = [
   {
+    version: "0.2.4",
+    date: "2026-09-26",
+    changes: {
+      en: [
+        "\"Just show over games & videos\": with a full-screen app in front, the notch stays visible but doesn't open under the pointer, and every click goes to the game. On by default, under Stay behind in Settings.",
+        "Right-clicking the notch no longer opens the browser menu with Reload in it, which nothing on the notch needs.",
+      ],
+      pt: [
+        "\"Só mostrar sobre jogos e vídeos\": com um app em tela cheia na frente, o notch continua visível, mas não abre com o mouse, e todo clique vai para o jogo. Vem ligado, em Configurações, na parte Ficar atrás.",
+        "O clique direito no notch não abre mais o menu do navegador com o Atualizar, que não servia para nada ali.",
+      ],
+      es: [
+        "\"Solo mostrar sobre juegos y vídeos\": con una app a pantalla completa delante, el notch sigue visible pero no se abre con el ratón, y todo clic va al juego. Viene activado, en Ajustes, en la parte Quedarse detrás.",
+        "El clic derecho en el notch ya no abre el menú del navegador con Recargar, que no servía para nada ahí.",
+      ],
+    },
+  },
+  {
     version: "0.2.3",
     date: "2026-09-22",
     changes: {
