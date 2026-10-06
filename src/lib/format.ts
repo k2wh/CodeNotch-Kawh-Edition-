@@ -5,6 +5,7 @@ import type {
   Activity,
   Health,
   ProviderSnapshot,
+  Session,
   UsageUnit,
   UsageWindow,
 } from "../types";
@@ -44,6 +45,47 @@ export function formatUsd(usd: number): string {
 /** "3.4x" — how many times over a plan has paid for itself. */
 export function formatMultiple(times: number): string {
   return times >= 10 ? `${Math.round(times)}x` : `${times.toFixed(1)}x`;
+}
+
+/** A writing speed as a whole number: "84". A figure under ten keeps a
+ *  decimal, since "3" against "3.6" is most of the answer. */
+export function formatSpeed(tokensPerSec: number): string {
+  return tokensPerSec >= 10 ? `${Math.round(tokensPerSec)}` : tokensPerSec.toFixed(1);
+}
+
+/** How long something has been going: "42s", "4m 12s", "1h 05m". */
+export function formatElapsed(since: string, now: number = Date.now()): string | null {
+  const started = new Date(since).getTime();
+  if (Number.isNaN(started)) return null;
+  const secs = Math.max(0, Math.round((now - started) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ${String(secs % 60).padStart(2, "0")}s`;
+  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * The sessions of a provider that are writing right now, each with its own
+ * speed, in the backend's order: the one that wrote last first, which is the
+ * one the ring shows.
+ *
+ * Never added together: two chats at 80 and 20 tokens a second are not one
+ * chat at 100.
+ *
+ * A speed outlives the writing by a while: a turn dropped half-way keeps the
+ * last one it had. So a session counts only while it is itself seen working,
+ * or while it is the one the provider's "working" is about — its hooks say so
+ * through a long think, when no transcript has been written for a minute, and
+ * the session first in line is the one that word belongs to. One that hasn't
+ * finished a reply yet has no speed, and doesn't borrow a neighbour's old one.
+ */
+export function writingSessions(provider: ProviderSnapshot): Session[] {
+  return provider.sessions.filter(
+    (session, index) =>
+      session.tokensPerSec != null &&
+      (session.activity === "generating" ||
+        (index === 0 && provider.activity === "generating")),
+  );
 }
 
 /**

@@ -65,6 +65,11 @@ Compared with the Windows port it started from:
 - What the subscription returns: set what a plan costs a month and the card
   prices the tokens it covered at the API's rates, against the fee for the days
   actually counted: `$1,284`, `6.4x` the plan.
+- Tokens per second while an agent writes: a small line under the ring's
+  numbers (`68 t/s`) for Claude Code and Codex, and on the card each chat's own
+  speed with what its turn has written so far and for how long. It is measured
+  per chat, from the time each reply took and the tokens it reports — several
+  chats at once are several speeds, never one sum.
 
 **The rings and their colours**
 

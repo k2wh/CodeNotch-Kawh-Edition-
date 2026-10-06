@@ -167,6 +167,9 @@ pub fn to_snapshot(models: &[LoadedModel]) -> ProviderSnapshot {
             tokens: model.context_length,
             detail: Some(model.detail()),
             host: None,
+            tokens_per_sec: None,
+            turn_tokens: None,
+            turn_started: None,
         })
         .collect::<Vec<_>>();
 

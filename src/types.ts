@@ -91,6 +91,16 @@ export interface Session {
    * `claude-vscode`, `cli`, `Codex Desktop`, `codex_vscode`, `codex_exec`, …
    */
   host?: string | null;
+  /**
+   * How fast this session is writing: output tokens a second over the last
+   * few replies of the turn under way. Its own, never a sum — two chats
+   * working at once have a speed each.
+   */
+  tokensPerSec?: number | null;
+  /** Output tokens written since the turn under way began, when known. */
+  turnTokens?: number | null;
+  /** When that turn began, when known. */
+  turnStarted?: string | null;
 }
 
 export interface ProviderSnapshot {

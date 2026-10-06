@@ -141,6 +141,10 @@ const en = {
   "ring.used": "{name}: {pct}% used",
   "ring.weekly": "7d",
 
+  "pace.aria": "writing at {speed} tokens a second",
+  "pace.speed": "{speed} tokens/s",
+  "pace.turn": "{tokens} tokens this turn",
+
   "update.ring.aria": "CodeNotch {version} update",
   "update.ring.download": "download",
   "update.ring.restart": "restart",
@@ -303,6 +307,10 @@ const pt: Dict = {
   "ring.used": "{name}: {pct}% usado",
   "ring.weekly": "7d",
 
+  "pace.aria": "escrevendo a {speed} tokens por segundo",
+  "pace.speed": "{speed} tokens/s",
+  "pace.turn": "{tokens} tokens neste turno",
+
   "update.ring.aria": "Atualização {version} do CodeNotch",
   "update.ring.download": "baixar",
   "update.ring.restart": "reiniciar",
@@ -461,6 +469,10 @@ const es: Dict = {
   "ring.unknown": "{name}: uso desconocido",
   "ring.used": "{name}: {pct}% usado",
   "ring.weekly": "7d",
+
+  "pace.aria": "escribiendo a {speed} tokens por segundo",
+  "pace.speed": "{speed} tokens/s",
+  "pace.turn": "{tokens} tokens en este turno",
 
   "update.ring.aria": "Actualización {version} de CodeNotch",
   "update.ring.download": "descargar",

@@ -168,6 +168,7 @@ export function NotchStrip({
               active={activeId === provider.key}
               showWeekly={showWeekly}
               weeklyOnRing={weeklyOnRing}
+              speedBeside={!vertical}
               customColour={ringColors[provider.key]}
               answered={answered.includes(provider.key)}
               pulseWaiting={pulseWaiting}

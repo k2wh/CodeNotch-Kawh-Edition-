@@ -288,6 +288,135 @@ pub fn project_label(cwd: &str) -> String {
         .to_string()
 }
 
+/// How fast a session is writing, and how much it has written this turn.
+///
+/// Per session, never across them: two chats working at once are two speeds,
+/// and adding them up would describe neither.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pace {
+    /// Output tokens a second over the last few replies of the turn — thinking
+    /// counted, since that is written too, and the wait for the first token
+    /// counted, since that is part of how long a reply takes.
+    pub tokens_per_sec: f32,
+    /// Output tokens written since the turn began. `None` when its beginning
+    /// was never seen: a count of part of the turn would pass for the whole.
+    pub turn_tokens: Option<u64>,
+    /// When the turn began, on the same terms.
+    pub turn_started: Option<DateTime<Utc>>,
+}
+
+/// What has been seen of a turn still under way, kept from one look at its
+/// transcript to the next.
+///
+/// Only a transcript's tail is read, and a long turn outgrows it: its
+/// beginning scrolls out of sight while it is still going, and the turn's
+/// totals with it — on exactly the turns long enough for anyone to wonder
+/// about. The tail is looked at every couple of seconds while it is being
+/// written, though, so nothing goes by unseen. What each look saw is kept
+/// here, and the turn's totals are everything seen since it began.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnMemo {
+    started: Option<DateTime<Utc>>,
+    /// The latest line seen, to tell whether the next look follows on.
+    seen_until: Option<DateTime<Utc>>,
+    /// What each reply of the turn wrote, by whatever names it.
+    replies: std::collections::HashMap<String, u64>,
+}
+
+impl TurnMemo {
+    /// Take in one look at the tail; get back when the turn began and what it
+    /// has written, when both are known.
+    ///
+    /// `started` is the turn's beginning while that is still in sight, and
+    /// `tail` the first and last moments the look covers. With the beginning
+    /// out of sight the totals stand only if this look reaches back to
+    /// something an earlier one saw: across a gap a turn could have ended and
+    /// another begun, and its count would be passed off as this one's.
+    pub fn observe<K: Into<String>>(
+        &mut self,
+        started: Option<DateTime<Utc>>,
+        tail: (Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+        replies: impl IntoIterator<Item = (K, u64)>,
+    ) -> Option<(DateTime<Utc>, u64)> {
+        match started {
+            Some(at) if self.started == Some(at) => {}
+            Some(at) => {
+                *self = TurnMemo {
+                    started: Some(at),
+                    ..TurnMemo::default()
+                }
+            }
+            None => {
+                let follows_on = self.started.is_some()
+                    && matches!((tail.0, self.seen_until), (Some(from), Some(seen)) if from <= seen);
+                if !follows_on {
+                    self.forget();
+                    return None;
+                }
+            }
+        }
+
+        for (key, tokens) in replies {
+            // A reply seen half-written has since been finished.
+            let known = self.replies.entry(key.into()).or_default();
+            *known = (*known).max(tokens);
+        }
+        self.seen_until = tail.1.max(self.seen_until);
+        Some((self.started?, self.replies.values().sum()))
+    }
+
+    /// The turn is over: nothing of it carries into the next.
+    pub fn forget(&mut self) {
+        *self = TurnMemo::default();
+    }
+}
+
+/// One reply of a turn: what it wrote and how long that took.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reply {
+    /// When the request that produced it went out: the user's message, or the
+    /// tool result that came back just before it.
+    pub asked: Option<DateTime<Utc>>,
+    /// When the last of it was written.
+    pub done: Option<DateTime<Utc>>,
+    /// Output tokens, thinking included.
+    pub tokens: u64,
+}
+
+/// Replies this many back still count towards the speed: enough that one
+/// short reply, which is mostly the wait for its first token, doesn't swing
+/// it; few enough that it is still how fast the agent is writing *now*.
+const PACE_REPLIES: usize = 3;
+/// A reply shorter than this in time says more about clocks than about speed.
+const PACE_MIN_SECS: f64 = 0.4;
+
+/// The pace the replies in sight add up to, oldest first.
+///
+/// `turn` is when the turn began and what it has written, from a
+/// [`TurnMemo`]. Without it the speed is still worked out, since that only
+/// needs the last few replies, and the turn's totals are left unsaid.
+pub fn pace_of(replies: &[Reply], turn: Option<(DateTime<Utc>, u64)>) -> Option<Pace> {
+    let (tokens, secs) = replies
+        .iter()
+        .rev()
+        .filter_map(|r| {
+            let secs = (r.done? - r.asked?).num_milliseconds() as f64 / 1000.0;
+            (secs >= PACE_MIN_SECS && r.tokens > 0).then_some((r.tokens, secs))
+        })
+        .take(PACE_REPLIES)
+        .fold((0u64, 0f64), |(t, s), (tokens, secs)| {
+            (t + tokens, s + secs)
+        });
+    if secs <= 0.0 {
+        return None;
+    }
+    Some(Pace {
+        tokens_per_sec: (tokens as f64 / secs) as f32,
+        turn_tokens: turn.map(|(_, tokens)| tokens),
+        turn_started: turn.map(|(started, _)| started),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     /// A server that keeps saying "thirty seconds" would otherwise keep
@@ -363,6 +492,37 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn a_turn_s_memo_counts_each_reply_once_at_what_it_came_to() {
+        let mut memo = TurnMemo::default();
+        let began = at("2026-01-01T00:00:00Z");
+        let seen = |from: &str, to: &str| (Some(at(from)), Some(at(to)));
+
+        let first = memo.observe(
+            Some(began),
+            seen("2026-01-01T00:00:00Z", "2026-01-01T00:00:10Z"),
+            [("a", 100)],
+        );
+        assert_eq!(first, Some((began, 100)));
+
+        // The same reply again, finished since, and a new one beside it.
+        let second = memo.observe(
+            None,
+            seen("2026-01-01T00:00:05Z", "2026-01-01T00:00:20Z"),
+            [("a", 250), ("b", 50)],
+        );
+        assert_eq!(second, Some((began, 300)));
+
+        // A new turn starts the count again.
+        let next = at("2026-01-01T00:01:00Z");
+        let third = memo.observe(
+            Some(next),
+            seen("2026-01-01T00:01:00Z", "2026-01-01T00:01:05Z"),
+            [("c", 10)],
+        );
+        assert_eq!(third, Some((next, 10)));
     }
 
     #[test]

@@ -8,13 +8,16 @@
 //! Multiple profiles are supported the way Codex itself does it: `~/.codex` plus
 //! any `~/.codex-<slug>` sibling directories.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as Json;
 
 use crate::adapters::{
-    first_line, home_dir, newest_files, newest_mtime, parse_timestamp, project_label, tail_lines,
+    first_line, home_dir, newest_files, newest_mtime, pace_of, parse_timestamp, project_label,
+    tail_lines, Pace, Reply, TurnMemo,
 };
 use crate::model::{
     Activity, Health, ProviderId, ProviderSnapshot, Session, UsageUnit, UsageWindow,
@@ -225,6 +228,8 @@ pub struct RolloutSummary {
     /// Where the session was started (`Codex Desktop`, `codex_vscode`,
     /// `codex_exec`, ...), from the `session_meta` line.
     pub originator: Option<String>,
+    /// How fast this session is writing, while a turn of its is under way.
+    pub pace: Option<Pace>,
 }
 
 /// The `session_meta` line carries the base instructions, so it can be large.
@@ -243,11 +248,23 @@ fn rollout_originator(path: &Path) -> Option<String> {
 /// Read a rollout transcript's tail: the newest rate-limit snapshot, the token
 /// total, and whether the agent is mid-flight or waiting on an approval.
 pub fn summarise_rollout(path: &Path, now: DateTime<Utc>) -> Option<RolloutSummary> {
+    summarise_rollout_with(path, now, &mut TurnMemo::default())
+}
+
+/// The same, carrying what earlier looks at this rollout saw of the turn
+/// under way (see [`TurnMemo`]).
+pub fn summarise_rollout_with(
+    path: &Path,
+    now: DateTime<Utc>,
+    memo: &mut TurnMemo,
+) -> Option<RolloutSummary> {
     let lines = tail_lines(path, TRANSCRIPT_TAIL_BYTES).ok()?;
     if lines.is_empty() {
         return None;
     }
 
+    // The first and last moments this tail covers.
+    let mut first_activity = None;
     let mut last_activity = None;
     let mut rate_limits = Vec::new();
     let mut total_tokens = None;
@@ -259,6 +276,19 @@ pub fn summarise_rollout(path: &Path, now: DateTime<Utc>) -> Option<RolloutSumma
     // When the turn ended, per Codex's own `task_complete`.
     let mut turn_end: Option<DateTime<Utc>> = None;
 
+    // The pace of the turn under way. Codex spreads a reply over several
+    // lines: the items the model wrote, a record when the response closed,
+    // and — only after the tool it called has answered — the count of what
+    // it wrote. So a reply is timed from the line that asked for it to its
+    // closing record, and gets its tokens from the count that follows.
+    let mut replies: Vec<Reply> = Vec::new();
+    let mut turn_started: Option<DateTime<Utc>> = None;
+    // The latest line that could have asked for a reply.
+    let mut asked: Option<DateTime<Utc>> = None;
+    // The reply being written: what asked for it, and when it last wrote.
+    let mut reply_asked: Option<DateTime<Utc>> = None;
+    let mut reply_done: Option<DateTime<Utc>> = None;
+
     for line in &lines {
         let Ok(json) = serde_json::from_str::<Json>(line) else {
             continue;
@@ -266,6 +296,7 @@ pub fn summarise_rollout(path: &Path, now: DateTime<Utc>) -> Option<RolloutSumma
 
         let line_ts = json.get("timestamp").and_then(parse_timestamp);
         if let Some(ts) = line_ts {
+            first_activity = first_activity.or(Some(ts));
             last_activity = Some(ts);
         }
 
@@ -309,7 +340,8 @@ pub fn summarise_rollout(path: &Path, now: DateTime<Utc>) -> Option<RolloutSumma
             }
         }
 
-        match event.get("type").and_then(Json::as_str) {
+        let kind = event.get("type").and_then(Json::as_str);
+        match kind {
             Some("function_call") | Some("local_shell_call") => {
                 pending_call = true;
                 pending_since = line_ts.or(pending_since);
@@ -324,9 +356,79 @@ pub fn summarise_rollout(path: &Path, now: DateTime<Utc>) -> Option<RolloutSumma
             Some("task_complete") | Some("turn_aborted") => turn_end = line_ts.or(last_activity),
             _ => {}
         }
+
+        // --- Pace ---
+        let record = json.get("type").and_then(Json::as_str);
+        let from_model = match kind {
+            Some("reasoning")
+            | Some("function_call")
+            | Some("local_shell_call")
+            | Some("custom_tool_call") => true,
+            // The user's messages are `message` items too.
+            Some("message") => event.get("role").and_then(Json::as_str) == Some("assistant"),
+            _ => false,
+        };
+        if kind == Some("task_started") {
+            turn_started = line_ts;
+            replies.clear();
+            asked = line_ts;
+            reply_asked = None;
+            reply_done = None;
+        } else if from_model && record == Some("response_item") {
+            if reply_done.is_none() {
+                reply_asked = asked;
+            }
+            reply_done = line_ts.or(reply_done);
+        } else if record == Some("token_usage_record") {
+            // The response closed: this, not its last item, is when it ended.
+            if reply_done.is_some() {
+                reply_done = line_ts.or(reply_done);
+            }
+        } else if kind == Some("token_count") {
+            let wrote = event
+                .get("info")
+                .and_then(|info| info.get("last_token_usage"))
+                .and_then(|usage| usage.get("output_tokens"))
+                .and_then(Json::as_u64);
+            if let (Some(tokens), Some(done)) = (wrote, reply_done) {
+                replies.push(Reply {
+                    asked: reply_asked,
+                    done: Some(done),
+                    tokens,
+                });
+                reply_asked = None;
+                reply_done = None;
+            }
+        } else if kind.is_some_and(|k| k.ends_with("_output"))
+            || matches!(kind, Some("message") | Some("user_message"))
+        {
+            // A tool answering, or the user speaking: what the next reply is
+            // an answer to.
+            asked = line_ts.or(asked);
+        }
     }
 
     let activity = classify(pending_call, pending_since, turn_end, last_activity, now);
+    // Only while a turn is under way: a finished one's speed is history. By
+    // Codex's own word for it rather than by how recently the file was
+    // written, since a reply that reasons for a minute writes nothing for a
+    // minute. One left open long ago was abandoned, not paused.
+    let recent = last_activity
+        .is_some_and(|at| now.signed_duration_since(at) < chrono::Duration::minutes(15));
+    let pace = if recent && turn_end.is_none() {
+        // A reply has no name here, so the moment it closed stands in for one.
+        let turn = memo.observe(
+            turn_started,
+            (first_activity, last_activity),
+            replies
+                .iter()
+                .filter_map(|reply| Some((reply.done?.to_rfc3339(), reply.tokens))),
+        );
+        pace_of(&replies, turn)
+    } else {
+        memo.forget();
+        None
+    };
 
     Some(RolloutSummary {
         id: path
@@ -340,6 +442,7 @@ pub fn summarise_rollout(path: &Path, now: DateTime<Utc>) -> Option<RolloutSumma
         activity,
         rate_limits,
         originator: rollout_originator(path),
+        pace,
     })
 }
 
@@ -401,6 +504,9 @@ pub struct CodexAdapter {
     /// `None` means every profile it can find, which is what a machine with
     /// one account wants and what the tests exercise.
     only: Option<CodexProfile>,
+    /// What has been seen of each session's turn under way, by rollout; see
+    /// `ClaudeAdapter::turns`.
+    turns: Mutex<HashMap<PathBuf, TurnMemo>>,
 }
 
 impl CodexAdapter {
@@ -408,6 +514,7 @@ impl CodexAdapter {
         Self {
             home: home_dir(),
             only: None,
+            turns: Mutex::default(),
         }
     }
 
@@ -417,6 +524,7 @@ impl CodexAdapter {
         Self {
             home: home_dir(),
             only: Some(profile),
+            turns: Mutex::default(),
         }
     }
 
@@ -451,6 +559,7 @@ impl CodexAdapter {
         Self {
             home: Some(home),
             only: None,
+            turns: Mutex::default(),
         }
     }
 
@@ -474,11 +583,18 @@ impl CodexAdapter {
         let mut windows: Vec<UsageWindow> = Vec::new();
         let mut newest_limits_at: Option<DateTime<Utc>> = None;
         let mut sessions = Vec::new();
+        // A poisoned lock only means a scan panicked half-way; what it holds
+        // is still each turn as last seen.
+        let mut turns = self.turns.lock().unwrap_or_else(|held| held.into_inner());
+        let mut scanned: Vec<PathBuf> = Vec::new();
 
         for profile in profiles {
             let transcripts = newest_files(&profile.sessions_dir(), "jsonl", MAX_TRANSCRIPTS);
             for path in transcripts {
-                let Some(summary) = summarise_rollout(&path, now) else {
+                let memo = turns.entry(path.clone()).or_default();
+                let summary = summarise_rollout_with(&path, now, memo);
+                scanned.push(path);
+                let Some(summary) = summary else {
                     continue;
                 };
 
@@ -510,9 +626,13 @@ impl CodexAdapter {
                     tokens: summary.total_tokens,
                     detail: None,
                     host: summary.originator,
+                    tokens_per_sec: summary.pace.map(|p| p.tokens_per_sec),
+                    turn_tokens: summary.pace.and_then(|p| p.turn_tokens),
+                    turn_started: summary.pace.and_then(|p| p.turn_started),
                 });
             }
         }
+        turns.retain(|path, _| scanned.contains(path));
 
         sessions.sort_by(|a, b| {
             b.activity
@@ -637,6 +757,146 @@ mod tests {
 
     fn ts(offset: i64) -> String {
         (at(NOW) + chrono::Duration::seconds(offset)).to_rfc3339()
+    }
+
+    /// A wrapped rollout line, as current Codex writes them.
+    fn line(record: &str, kind: &str, offset: i64, extra: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{}","type":"{record}","payload":{{"type":"{kind}"{extra}}}}}"#,
+            ts(offset)
+        )
+    }
+
+    /// The count Codex writes for the reply before it.
+    fn wrote(offset: i64, tokens: u64) -> String {
+        line(
+            "event_msg",
+            "token_count",
+            offset,
+            &format!(r#","info":{{"last_token_usage":{{"output_tokens":{tokens}}}}}"#),
+        )
+    }
+
+    #[test]
+    fn a_rollout_s_pace_times_each_reply_to_its_own_count() {
+        let dir = tempfile::tempdir().unwrap();
+        // The order a real rollout has: the model's items, a record when the
+        // response closes, the tool's answer, and only then the count of what
+        // the reply before it wrote.
+        let path = write_rollout(
+            dir.path(),
+            "rollout-pace.jsonl",
+            &[
+                line("event_msg", "task_started", -60, ""),
+                line("response_item", "message", -60, r#","role":"user""#),
+                line("response_item", "reasoning", -52, ""),
+                line("response_item", "custom_tool_call", -50, ""),
+                format!(
+                    r#"{{"timestamp":"{}","type":"token_usage_record"}}"#,
+                    ts(-50)
+                ), // 10 s after the prompt
+                line("response_item", "custom_tool_call_output", -45, ""),
+                wrote(-45, 300),
+                line("response_item", "reasoning", -42, ""),
+                line("response_item", "custom_tool_call", -40, ""),
+                format!(
+                    r#"{{"timestamp":"{}","type":"token_usage_record"}}"#,
+                    ts(-40)
+                ), // 5 s after the tool answered
+                line("response_item", "custom_tool_call_output", -38, ""),
+                wrote(-38, 100),
+                // A third reply under way: no count for it yet.
+                line("response_item", "reasoning", -30, ""),
+            ],
+        );
+
+        let summary = summarise_rollout(&path, at(NOW) - chrono::Duration::seconds(28)).unwrap();
+        let pace = summary.pace.expect("a turn is under way");
+        // 400 tokens over 10 + 5 seconds of writing; the tools' time isn't in it.
+        assert!((pace.tokens_per_sec - 400.0 / 15.0).abs() < 0.01);
+        assert_eq!(pace.turn_tokens, Some(400));
+        assert_eq!(
+            pace.turn_started,
+            Some(at(NOW) - chrono::Duration::seconds(60))
+        );
+    }
+
+    #[test]
+    fn a_finished_rollout_turn_shows_no_pace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-done.jsonl",
+            &[
+                line("event_msg", "task_started", -60, ""),
+                line("response_item", "message", -50, r#","role":"assistant""#),
+                format!(
+                    r#"{{"timestamp":"{}","type":"token_usage_record"}}"#,
+                    ts(-50)
+                ),
+                wrote(-50, 300),
+                line("event_msg", "task_complete", -49, ""),
+            ],
+        );
+        let summary = summarise_rollout(&path, at(NOW)).unwrap();
+        assert_eq!(summary.pace, None);
+    }
+
+    #[test]
+    fn a_long_rollout_turn_keeps_its_totals_once_its_start_is_out_of_sight() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut memo = TurnMemo::default();
+        let closed = |offset: i64| {
+            format!(
+                r#"{{"timestamp":"{}","type":"token_usage_record"}}"#,
+                ts(offset)
+            )
+        };
+
+        // The first look still has the turn's start in it.
+        let path = write_rollout(
+            dir.path(),
+            "rollout-long.jsonl",
+            &[
+                line("event_msg", "task_started", -100, ""),
+                line("response_item", "message", -100, r#","role":"user""#),
+                line("response_item", "custom_tool_call", -90, ""),
+                closed(-90),
+                line("response_item", "custom_tool_call_output", -85, ""),
+                wrote(-85, 300),
+            ],
+        );
+        let early = at(NOW) - chrono::Duration::seconds(84);
+        let summary = summarise_rollout_with(&path, early, &mut memo).unwrap();
+        assert_eq!(summary.pace.unwrap().turn_tokens, Some(300));
+
+        // By the next the tail has moved on, though it still reaches back to
+        // a line seen then. The count it opens with belongs to a reply that
+        // is no longer here, and was taken in the first time round.
+        let path = write_rollout(
+            dir.path(),
+            "rollout-long.jsonl",
+            &[
+                line("response_item", "custom_tool_call_output", -85, ""),
+                wrote(-85, 300),
+                line("response_item", "custom_tool_call", -78, ""),
+                closed(-78),
+                line("response_item", "custom_tool_call_output", -75, ""),
+                wrote(-75, 200),
+            ],
+        );
+        let later = at(NOW) - chrono::Duration::seconds(74);
+        let pace = summarise_rollout_with(&path, later, &mut memo)
+            .unwrap()
+            .pace
+            .unwrap();
+        assert_eq!(pace.turn_tokens, Some(500));
+        assert_eq!(
+            pace.turn_started,
+            Some(at(NOW) - chrono::Duration::seconds(100))
+        );
+        // The speed is of the reply in sight: 200 tokens in 7 seconds.
+        assert!((pace.tokens_per_sec - 200.0 / 7.0).abs() < 0.01);
     }
 
     #[test]

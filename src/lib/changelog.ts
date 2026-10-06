@@ -21,6 +21,27 @@ export interface Release {
 
 export const CHANGELOG: Release[] = [
   {
+    version: "0.2.5",
+    date: "2026-10-06",
+    changes: {
+      en: [
+        "Tokens per second on the ring: while an agent is writing, a small line under the ring's numbers says how fast (\"68 t/s\"), for Claude Code and Codex. It goes when the turn ends. With the notch on the top or bottom edge it sits beside the percentage instead.",
+        "Hover the ring for the rest: each chat that is writing shows its own speed, how many tokens the turn has written so far and how long it has been going.",
+        "With several chats open, each keeps its own speed — they are never added up — and the ring shows one chat's: the one that wrote last.",
+      ],
+      pt: [
+        "Tokens por segundo no anel: enquanto um agente escreve, uma linha pequena embaixo dos números do anel diz a que velocidade (\"68 t/s\"), no Claude Code e no Codex. Ela some quando o turno termina. Com o notch na borda de cima ou de baixo, fica ao lado da porcentagem.",
+        "Passe o mouse no anel para ver o resto: cada chat que está escrevendo mostra a própria velocidade, quantos tokens o turno já escreveu e há quanto tempo ele está rodando.",
+        "Com vários chats abertos, cada um tem a sua velocidade — elas nunca são somadas — e o anel mostra a de um só: o que escreveu por último.",
+      ],
+      es: [
+        "Tokens por segundo en el anillo: mientras un agente escribe, una línea pequeña bajo los números del anillo dice a qué velocidad (\"68 t/s\"), en Claude Code y en Codex. Desaparece cuando termina el turno. Con el notch en el borde de arriba o de abajo, queda al lado del porcentaje.",
+        "Pasa el ratón por el anillo para ver el resto: cada chat que está escribiendo muestra su propia velocidad, cuántos tokens lleva escritos el turno y cuánto tiempo lleva en marcha.",
+        "Con varios chats abiertos, cada uno tiene su velocidad —nunca se suman— y el anillo muestra la de uno solo: el que escribió último.",
+      ],
+    },
+  },
+  {
     version: "0.2.4",
     date: "2026-09-26",
     changes: {

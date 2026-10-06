@@ -7,17 +7,22 @@
  * obvious which one you are reading.
  */
 
+import { useEffect, useState } from "react";
+
 import type { Config, Edge, ProviderSnapshot, Session } from "../types";
 import {
   activityLabel,
   formatAgo,
   formatCount,
   formatDays,
+  formatElapsed,
   formatMultiple,
   formatReset,
+  formatSpeed,
   formatUsd,
   healthLabel,
   windowValue,
+  writingSessions,
 } from "../lib/format";
 import { useI18n } from "../lib/i18n";
 import { BrandIcon } from "./BrandIcon";
@@ -83,6 +88,23 @@ export function Tail({ edge, thickness }: { edge: Edge; thickness: number }) {
   );
 }
 
+/**
+ * How long a turn has been going, counting on its own.
+ *
+ * The card is only redrawn when something is written, and a model thinking
+ * writes nothing for a minute at a time: without its own clock the count
+ * would sit still exactly when someone is watching it.
+ */
+function Elapsed({ since }: { since: string }) {
+  const [text, setText] = useState(() => formatElapsed(since));
+  useEffect(() => {
+    setText(formatElapsed(since));
+    const timer = window.setInterval(() => setText(formatElapsed(since)), 1000);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  return <>{text}</>;
+}
+
 export function UsagePopover({
   provider,
   config,
@@ -95,6 +117,7 @@ export function UsagePopover({
   const health = healthLabel(provider.health, t);
   const activity = activityLabel(provider.activity, t);
   const detail = provider.detail ? server(provider.detail) : null;
+  const writers = writingSessions(provider);
 
   return (
     <div
@@ -228,22 +251,43 @@ export function UsagePopover({
 
       {provider.sessions.length > 0 && (
         <div className="popover-sessions">
-          {provider.sessions.slice(0, 3).map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              className="session-row"
-              onClick={() => onFocusProvider(provider, session)}
-            >
-              <span className="session-dot" data-state={session.activity} />
-              <span className="session-title">{session.title}</span>
-              <span className="session-meta tnum">
-                {(session.detail && server(session.detail)) ??
-                  formatAgo(session.lastActivity, t) ??
-                  ""}
-              </span>
-            </button>
-          ))}
+          {provider.sessions.slice(0, 3).map((session) => {
+            // Each chat that is writing says how fast, on its own row: two
+            // at once are two speeds, never one sum.
+            const writing = writers.includes(session);
+            // What the turn has come to so far, when its start was seen.
+            const turn = writing && session.turnTokens != null;
+            return (
+              <button
+                key={session.id}
+                type="button"
+                className="session-row"
+                data-turn={turn || undefined}
+                onClick={() => onFocusProvider(provider, session)}
+              >
+                <span className="session-dot" data-state={session.activity} />
+                <span className="session-title">{session.title}</span>
+                <span className="session-meta tnum" data-writing={writing || undefined}>
+                  {writing
+                    ? t("pace.speed", { speed: formatSpeed(session.tokensPerSec ?? 0) })
+                    : ((session.detail && server(session.detail)) ??
+                      formatAgo(session.lastActivity, t) ??
+                      "")}
+                </span>
+                {turn && (
+                  <span className="session-pace tnum">
+                    {t("pace.turn", { tokens: formatCount(session.turnTokens ?? 0) })}
+                    {session.turnStarted && formatElapsed(session.turnStarted) !== null && (
+                      <>
+                        {" · "}
+                        <Elapsed since={session.turnStarted} />
+                      </>
+                    )}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

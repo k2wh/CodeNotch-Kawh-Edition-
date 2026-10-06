@@ -16,9 +16,11 @@ import {
   blockedUntil,
   formatCountdownShort,
   formatPct,
+  formatSpeed,
   ringSplit,
   shortWindowLabel,
   usageTone,
+  writingSessions,
 } from "../lib/format";
 import { useI18n } from "../lib/i18n";
 import { BrandIcon } from "./BrandIcon";
@@ -29,6 +31,9 @@ const ENTRANCE_BASE_MS = 260;
 const ENTRANCE_STAGGER_MS = 110;
 /** How long the arc takes to draw and the number to count up. */
 const FILL_MS = 900;
+
+/** The writing speed's type size on a ring this big: the smallest thing on it. */
+const speedFontSize = (ring: number) => Math.max(8, Math.round(ring * 0.15));
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
@@ -109,6 +114,8 @@ interface Props {
   showWeekly: boolean;
   /** Put the weekly quota on the ring and the session limit underneath. */
   weeklyOnRing: boolean;
+  /** The strip runs along a top or bottom edge: no room under the column. */
+  speedBeside?: boolean;
   /** User-picked `#rrggbb` replacing the traffic light, if any. */
   customColour?: string;
   /** This agent answered moments ago: pulse until it has been seen. */
@@ -145,6 +152,7 @@ export function ProviderRing({
   active,
   showWeekly,
   weeklyOnRing,
+  speedBeside,
   customColour,
   answered,
   pulseWaiting,
@@ -184,6 +192,21 @@ export function ProviderRing({
   const generating = provider.activity === "generating";
   const waiting = provider.activity === "awaitingInput";
   const iconSize = Math.round(size * 0.385);
+  const speed = generating ? (writingSessions(provider)[0]?.tokensPerSec ?? null) : null;
+
+  // How fast the agent is writing, while it is: one chat's speed, the one
+  // that wrote last, never several added up. Out of the flow wherever it
+  // goes, so the ring doesn't shift each time a turn starts and ends.
+  const speedLine = speed !== null && (
+    <span
+      className="ring-speed tnum"
+      data-beside={speedBeside || undefined}
+      style={{ fontSize: speedFontSize(size) }}
+      aria-label={t("pace.aria", { speed: formatSpeed(speed) })}
+    >
+      {formatSpeed(speed)} t/s
+    </span>
+  );
 
   return (
     <button
@@ -277,6 +300,9 @@ export function ProviderRing({
         style={{ fontSize: Math.round(size * (blocked ? 0.27 : 0.355)) }}
       >
         {blocked ? <Countdown target={blocked} /> : pct === null ? "—" : formatPct(shownPct ?? 0)}
+        {/* Across a top or bottom strip the column has the strip's whole
+            depth already, so the speed goes beside the number instead. */}
+        {speedBeside && speedLine}
       </span>
 
       {weekly && weeklyPct !== null && (
@@ -301,6 +327,10 @@ export function ProviderRing({
           </span>
         </span>
       )}
+
+      {/* Along a left or right edge: under everything, in the gap before the
+          next ring. */}
+      {!speedBeside && speedLine}
     </button>
   );
 }

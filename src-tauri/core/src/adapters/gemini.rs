@@ -250,6 +250,9 @@ impl GeminiAdapter {
                 tokens: None,
                 detail: Some(format!("{} messages", s.messages)),
                 host: None,
+                tokens_per_sec: None,
+                turn_tokens: None,
+                turn_started: None,
             })
             .collect();
 

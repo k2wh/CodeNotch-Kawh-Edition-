@@ -16,15 +16,17 @@
 //! beside its settings. Those are real readings, taken by the app for itself;
 //! nothing of the app's session is read or used to ask for them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as Json;
 
 use crate::adapters::{
-    home_dir, newest_files, newest_mtime, parse_timestamp, project_label, tail_lines, Backoff,
+    home_dir, newest_files, newest_mtime, pace_of, parse_timestamp, project_label, tail_lines,
+    Backoff, Pace, Reply, TurnMemo,
 };
 use crate::model::{
     Activity, Health, ProviderId, ProviderSnapshot, Session, UsageUnit, UsageWindow,
@@ -404,6 +406,26 @@ struct TranscriptEntry {
     /// An assistant turn that only said something, with no tool call. These
     /// get no end-of-turn record, so they need the silence rule.
     text_only: bool,
+    /// The API message this line is a block of. One reply is written as one
+    /// line per block, each stamped when that block finished and all carrying
+    /// the reply's whole usage.
+    message_id: Option<String>,
+    /// What the reply this line belongs to wrote, thinking included.
+    output_tokens: u64,
+    /// The model spoke, as opposed to the user or a tool answering it.
+    assistant: bool,
+    /// The user said something — not a tool result coming back, which is the
+    /// same kind of line. Where a turn begins.
+    prompt: bool,
+    /// A subagent's line, written into its parent's transcript.
+    sidechain: bool,
+    /// Written by Claude Code on the user's behalf (a command's output, an
+    /// image's path): part of nothing, and no sign of anything.
+    meta: bool,
+    /// Whether the reply this line belongs to was the turn's last, by its own
+    /// account: every line of a reply carries how the whole reply ended.
+    /// `None` when it doesn't say.
+    last_word: Option<bool>,
 }
 
 fn parse_entry(line: &str) -> Option<TranscriptEntry> {
@@ -420,6 +442,8 @@ fn parse_entry(line: &str) -> Option<TranscriptEntry> {
 
     let kind = json.get("type").and_then(Json::as_str);
     entry.message = matches!(kind, Some("user") | Some("assistant"));
+    entry.assistant = kind == Some("assistant");
+    entry.sidechain = json.get("isSidechain").and_then(Json::as_bool) == Some(true);
     entry.turn_end = kind == Some("system")
         && json.get("subtype").and_then(Json::as_str) == Some("turn_duration");
 
@@ -428,8 +452,19 @@ fn parse_entry(line: &str) -> Option<TranscriptEntry> {
             .get("model")
             .and_then(Json::as_str)
             .map(str::to_string);
+        entry.message_id = message.get("id").and_then(Json::as_str).map(str::to_string);
+        // A reply that stopped to call a tool, or was paused to be resumed,
+        // has more coming; one that stopped for any other reason was the end.
+        entry.last_word = message
+            .get("stop_reason")
+            .and_then(Json::as_str)
+            .map(|why| !matches!(why, "tool_use" | "pause_turn"));
 
         if let Some(usage) = message.get("usage") {
+            entry.output_tokens = usage
+                .get("output_tokens")
+                .and_then(Json::as_u64)
+                .unwrap_or(0);
             // Cache reads are charged differently but still count towards the
             // window, so include every bucket the transcript reports.
             for field in [
@@ -474,7 +509,108 @@ fn parse_entry(line: &str) -> Option<TranscriptEntry> {
         }
     }
 
+    // Lines Claude Code writes on the user's behalf are `user` lines too, and
+    // start nothing. Nor does the summary a long conversation is cut down to:
+    // that happens in the middle of a turn, which carries on after it.
+    let flag = |name: &str| json.get(name).and_then(Json::as_bool) == Some(true);
+    entry.meta = flag("isMeta");
+    entry.prompt = kind == Some("user")
+        && entry.tool_results.is_empty()
+        && !entry.meta
+        && !flag("isCompactSummary");
+
     Some(entry)
+}
+
+/// A turn left open this long ago was abandoned, not paused: the session was
+/// closed mid-flight, and its speed is nobody's news.
+const PACE_OPEN_MINS: i64 = 15;
+
+/// Whether the transcript ends in the middle of a turn.
+///
+/// It does unless Claude Code wrote the turn's end, or the model had the
+/// last word. A reply says how it ended, and one that stopped for a tool has
+/// more coming however its last line reads — the words before a tool call
+/// are a line of their own, and look like an answer. Where it doesn't say, a
+/// reply that asks for no tool is the answer, and nothing follows it. A tool
+/// call, a tool's result or the user's own message all leave something still
+/// to come.
+fn turn_open(entries: &[TranscriptEntry]) -> bool {
+    entries
+        .iter()
+        .rev()
+        .find(|e| (e.message || e.turn_end) && !e.sidechain && !e.meta)
+        .is_some_and(|last| {
+            if last.turn_end {
+                return false;
+            }
+            !(last.assistant && last.last_word.unwrap_or(last.text_only))
+        })
+}
+
+/// Work out the pace of the turn under way from a transcript's tail.
+///
+/// A reply is written as one line per block, each stamped when that block
+/// finished and each carrying the reply's whole usage — so its tokens are
+/// counted once, by id, and its duration runs from the line that asked for it
+/// to its last block. Tools run while later blocks are still streaming, so a
+/// tool result can sit between two blocks of the same reply; that result asks
+/// for the *next* reply, never this one.
+fn pace(entries: &[TranscriptEntry], memo: &mut TurnMemo) -> Option<Pace> {
+    // The turn under way begins at the last thing the user said. A long turn
+    // outgrows the tail that was read, and then its beginning isn't here:
+    // the speed still is, since that only needs the last few replies, and
+    // the turn's totals are whatever `memo` saw of it on the way.
+    let begin = entries.iter().rposition(|e| e.prompt && !e.sidechain);
+    let (turn, turn_started) = match begin {
+        Some(at) => (&entries[at + 1..], entries[at].timestamp),
+        None => (entries, None),
+    };
+
+    // By the id of the API message each is.
+    let mut replies: Vec<(&str, Reply)> = Vec::new();
+    // The latest line that could have asked for a reply. With the turn's
+    // start out of sight, the first reply here has nothing to be timed from.
+    let mut asked = turn_started;
+    for entry in turn {
+        if entry.sidechain {
+            continue;
+        }
+        if !entry.assistant {
+            if entry.message {
+                asked = entry.timestamp.or(asked);
+            }
+            continue;
+        }
+        let Some(id) = entry.message_id.as_deref() else {
+            continue;
+        };
+        match replies.iter_mut().find(|(known, _)| *known == id) {
+            Some((_, reply)) => {
+                reply.done = entry.timestamp.max(reply.done);
+                // A block flushed mid-stream can carry a count from before
+                // the reply finished; the later one is the true total.
+                reply.tokens = reply.tokens.max(entry.output_tokens);
+            }
+            None => replies.push((
+                id,
+                Reply {
+                    asked,
+                    done: entry.timestamp,
+                    tokens: entry.output_tokens,
+                },
+            )),
+        }
+    }
+
+    let stamps = || entries.iter().filter_map(|e| e.timestamp);
+    let turn = memo.observe(
+        turn_started,
+        (stamps().next(), stamps().next_back()),
+        replies.iter().map(|(id, reply)| (*id, reply.tokens)),
+    );
+    let replies: Vec<Reply> = replies.into_iter().map(|(_, reply)| reply).collect();
+    pace_of(&replies, turn)
 }
 
 /// What a single transcript tells us.
@@ -489,6 +625,8 @@ pub struct TranscriptSummary {
     pub tokens: u64,
     pub last_activity: Option<DateTime<Utc>>,
     pub activity: Activity,
+    /// How fast this session is writing, while a turn of its is under way.
+    pub pace: Option<Pace>,
 }
 
 /// Read one transcript's tail and classify what the session is doing.
@@ -498,6 +636,16 @@ pub struct TranscriptSummary {
 /// followed it, Claude Code is sitting at a permission prompt waiting for the
 /// user. That is the state worth interrupting someone for.
 pub fn summarise_transcript(path: &Path, now: DateTime<Utc>) -> Option<TranscriptSummary> {
+    summarise_transcript_with(path, now, &mut TurnMemo::default())
+}
+
+/// The same, carrying what earlier looks at this transcript saw of the turn
+/// under way (see [`TurnMemo`]).
+pub fn summarise_transcript_with(
+    path: &Path,
+    now: DateTime<Utc>,
+    memo: &mut TurnMemo,
+) -> Option<TranscriptSummary> {
     let lines = tail_lines(path, TRANSCRIPT_TAIL_BYTES).ok()?;
     let entries: Vec<TranscriptEntry> = lines.iter().filter_map(|l| parse_entry(l)).collect();
     if entries.is_empty() {
@@ -533,6 +681,19 @@ pub fn summarise_transcript(path: &Path, now: DateTime<Utc>) -> Option<Transcrip
     let entrypoint = entries.iter().rev().find_map(|e| e.entrypoint.clone());
 
     let activity = classify(&entries, last_activity, now);
+    // Only while a turn is under way: a finished turn's speed is history, and
+    // the ring is for what is happening. By what the transcript says rather
+    // than by how recently it was written to — a reply that thinks for a
+    // minute writes nothing for a minute, and is no less under way.
+    let recent = last_activity.is_some_and(|at| {
+        now.signed_duration_since(at) < chrono::Duration::minutes(PACE_OPEN_MINS)
+    });
+    let pace = if recent && turn_open(&entries) {
+        pace(&entries, memo)
+    } else {
+        memo.forget();
+        None
+    };
 
     Some(TranscriptSummary {
         session_id,
@@ -543,6 +704,7 @@ pub fn summarise_transcript(path: &Path, now: DateTime<Utc>) -> Option<Transcrip
         tokens,
         last_activity,
         activity,
+        pace,
     })
 }
 
@@ -871,6 +1033,10 @@ pub struct ClaudeAdapter {
     /// no Claude Code login here. It belongs to whichever account the app is
     /// signed into, so like Credential Manager it is the default account's.
     app_usage: Option<PathBuf>,
+    /// What has been seen of each session's turn under way, by transcript:
+    /// the sessions are scanned through a shared reference, and a long turn's
+    /// totals have to outlive the look that last saw its beginning.
+    turns: Mutex<HashMap<PathBuf, TurnMemo>>,
 }
 
 impl ClaudeAdapter {
@@ -884,6 +1050,7 @@ impl ClaudeAdapter {
             backoff_health: Health::RateLimited,
             shared_store: true,
             app_usage: app_usage_file(),
+            turns: Mutex::default(),
         }
     }
 
@@ -915,6 +1082,7 @@ impl ClaudeAdapter {
             backoff_health: Health::RateLimited,
             shared_store: true,
             app_usage: app_usage_file(),
+            turns: Mutex::default(),
         }
     }
 
@@ -1050,23 +1218,34 @@ impl ClaudeAdapter {
         };
         let cutoff = now - chrono::Duration::hours(SESSION_WINDOW_HOURS);
 
-        let mut sessions: Vec<Session> =
-            newest_files(&paths.projects_dir(), "jsonl", MAX_TRANSCRIPTS)
-                .into_iter()
-                .filter_map(|p| summarise_transcript(&p, now))
-                .filter(|s| s.last_activity.is_none_or(|t| t >= cutoff))
-                .map(|s| Session {
-                    id: s.session_id,
-                    title: s.project,
-                    cwd: s.cwd,
-                    model: s.model,
-                    activity: s.activity,
-                    last_activity: s.last_activity,
-                    tokens: Some(s.tokens).filter(|t| *t > 0),
-                    detail: None,
-                    host: s.entrypoint,
-                })
-                .collect();
+        let transcripts = newest_files(&paths.projects_dir(), "jsonl", MAX_TRANSCRIPTS);
+        // A poisoned lock only means a scan panicked half-way; what it holds
+        // is still each turn as last seen.
+        let mut turns = self.turns.lock().unwrap_or_else(|held| held.into_inner());
+        turns.retain(|path, _| transcripts.contains(path));
+
+        let mut sessions: Vec<Session> = transcripts
+            .into_iter()
+            .filter_map(|p| {
+                let memo = turns.entry(p.clone()).or_default();
+                summarise_transcript_with(&p, now, memo)
+            })
+            .filter(|s| s.last_activity.is_none_or(|t| t >= cutoff))
+            .map(|s| Session {
+                id: s.session_id,
+                title: s.project,
+                cwd: s.cwd,
+                model: s.model,
+                activity: s.activity,
+                last_activity: s.last_activity,
+                tokens: Some(s.tokens).filter(|t| *t > 0),
+                detail: None,
+                host: s.entrypoint,
+                tokens_per_sec: s.pace.map(|p| p.tokens_per_sec),
+                turn_tokens: s.pace.and_then(|p| p.turn_tokens),
+                turn_started: s.pace.and_then(|p| p.turn_started),
+            })
+            .collect();
 
         // Most interesting first: blocked, then generating, then most recent.
         sessions.sort_by(|a, b| {
@@ -1435,6 +1614,427 @@ mod tests {
             .unwrap();
         }
         path
+    }
+
+    /// One block of a reply: every block of a reply carries its whole usage.
+    fn block(id: &str, kind: &str, tokens: u64) -> String {
+        let content = match kind {
+            "tool_use" => r#"{"type":"tool_use","id":"t","name":"Bash"}"#.to_string(),
+            other => format!(r#"{{"type":"{other}"}}"#),
+        };
+        format!(
+            r#""message":{{"id":"{id}","role":"assistant","usage":{{"output_tokens":{tokens}}},"content":[{content}]}}"#
+        )
+    }
+    const PROMPT: &str = r#""message":{"role":"user","content":"do it"}"#;
+    const RESULT: &str =
+        r#""message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t"}]}"#;
+
+    #[test]
+    fn a_turn_s_pace_counts_each_reply_once_over_the_time_it_took() {
+        let dir = tempfile::tempdir().unwrap();
+        // The shape a real transcript has: three blocks of one reply, each
+        // stamped as it finished and each carrying the reply's 800 tokens.
+        let a = block("msg_a", "thinking", 800);
+        let a_text = block("msg_a", "text", 800);
+        let a_tool = block("msg_a", "tool_use", 800);
+        // The second reply calls two tools; the first one's result comes back
+        // while the second call is still being written.
+        let b_first = block("msg_b", "tool_use", 300);
+        let b_second = block("msg_b", "tool_use", 300);
+        let c = block("msg_c", "tool_use", 500);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -60, PROMPT),
+                ("assistant", -50, &a),
+                ("assistant", -49, &a_text),
+                ("assistant", -45, &a_tool), // 15 s after the prompt
+                ("user", -44, RESULT),
+                ("assistant", -40, &b_first),
+                ("user", -39, RESULT),
+                ("assistant", -36, &b_second), // 8 s after the result that asked
+                ("user", -30, RESULT),
+                ("assistant", -20, &c), // 10 s
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW) - chrono::Duration::seconds(18)).unwrap();
+        let pace = summary.pace.expect("a turn is under way");
+
+        // 800 + 300 + 500, not the 3,500 the blocks add up to line by line.
+        assert_eq!(pace.turn_tokens, Some(1600));
+        // Over 15 + 8 + 10 seconds of writing; the tools' own time isn't in it.
+        assert!((pace.tokens_per_sec - 1600.0 / 33.0).abs() < 0.01);
+        assert_eq!(
+            pace.turn_started,
+            Some(at(NOW) - chrono::Duration::seconds(60))
+        );
+    }
+
+    #[test]
+    fn pace_is_about_now_not_the_whole_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        // A slow first reply, then four quick ones: the speed shown is the
+        // last three's, though every reply's tokens count towards the turn.
+        let slow = block("msg_0", "text", 100);
+        let quick: Vec<String> = (1..=4)
+            .map(|n| block(&format!("msg_{n}"), "tool_use", 200))
+            .collect();
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -200, PROMPT),
+                ("assistant", -100, &slow), // 1 token a second
+                ("user", -99, RESULT),
+                ("assistant", -97, &quick[0]), // 100 a second from here on
+                ("user", -96, RESULT),
+                ("assistant", -94, &quick[1]),
+                ("user", -93, RESULT),
+                ("assistant", -91, &quick[2]),
+                ("user", -90, RESULT),
+                ("assistant", -88, &quick[3]),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW) - chrono::Duration::seconds(86)).unwrap();
+        let pace = summary.pace.unwrap();
+        assert_eq!(pace.turn_tokens, Some(900));
+        assert!((pace.tokens_per_sec - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_turn_longer_than_the_tail_still_has_a_speed() {
+        let dir = tempfile::tempdir().unwrap();
+        // What a long turn looks like from its tail: the prompt that began it
+        // is further back than was read. The speed needs only the last few
+        // replies; the turn's total would be a count of part of it, so there
+        // is none.
+        let cut = block("msg_cut", "tool_use", 900);
+        let whole = block("msg_whole", "tool_use", 600);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                // Its first blocks, and whatever asked for it, are out of sight.
+                ("assistant", -20, &cut),
+                ("user", -19, RESULT),
+                ("assistant", -9, &whole), // 600 tokens in 10 s
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW) - chrono::Duration::seconds(8)).unwrap();
+        let pace = summary.pace.unwrap();
+        assert!((pace.tokens_per_sec - 60.0).abs() < 0.01);
+        assert_eq!(pace.turn_tokens, None);
+        assert_eq!(pace.turn_started, None);
+    }
+
+    #[test]
+    fn a_long_turn_keeps_its_totals_once_its_start_is_out_of_sight() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut memo = TurnMemo::default();
+        let first = block("msg_1", "tool_use", 700);
+        let second = block("msg_2", "tool_use", 500);
+        let third = block("msg_3", "tool_use", 300);
+
+        // The first look still has the prompt in it.
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -100, PROMPT),
+                ("assistant", -90, &first),
+                ("user", -88, RESULT),
+            ],
+        );
+        let early = at(NOW) - chrono::Duration::seconds(87);
+        let summary = summarise_transcript_with(&path, early, &mut memo).unwrap();
+        assert_eq!(summary.pace.unwrap().turn_tokens, Some(700));
+
+        // By the next the tail has moved on: the prompt and the first reply
+        // are gone from it, though it still reaches back to a line seen then.
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -88, RESULT),
+                ("assistant", -80, &second),
+                ("user", -78, RESULT),
+                ("assistant", -72, &third),
+            ],
+        );
+        let later = at(NOW) - chrono::Duration::seconds(70);
+        let pace = summarise_transcript_with(&path, later, &mut memo)
+            .unwrap()
+            .pace
+            .unwrap();
+        // All three replies, counted from the prompt that is no longer here.
+        assert_eq!(pace.turn_tokens, Some(1500));
+        assert_eq!(
+            pace.turn_started,
+            Some(at(NOW) - chrono::Duration::seconds(100))
+        );
+        // The speed is of the replies in sight: 800 tokens in 8 + 6 seconds.
+        assert!((pace.tokens_per_sec - 800.0 / 14.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn totals_are_dropped_when_part_of_the_turn_went_by_unseen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut memo = TurnMemo::default();
+        let first = block("msg_1", "tool_use", 700);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -100, PROMPT),
+                ("assistant", -90, &first),
+                ("user", -88, RESULT),
+            ],
+        );
+        let early = at(NOW) - chrono::Duration::seconds(87);
+        summarise_transcript_with(&path, early, &mut memo).unwrap();
+
+        // The next look starts after the last line the first one saw. Between
+        // the two a turn could have ended and another begun, so what was
+        // counted before can't be called this turn's.
+        let later = block("msg_9", "tool_use", 300);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[("user", -60, RESULT), ("assistant", -50, &later)],
+        );
+        let now = at(NOW) - chrono::Duration::seconds(48);
+        let pace = summarise_transcript_with(&path, now, &mut memo)
+            .unwrap()
+            .pace
+            .unwrap();
+        assert!((pace.tokens_per_sec - 30.0).abs() < 0.01);
+        assert_eq!(pace.turn_tokens, None);
+        assert_eq!(pace.turn_started, None);
+    }
+
+    /// A block saying how the reply it belongs to ended.
+    fn block_ending(id: &str, kind: &str, tokens: u64, stop: &str) -> String {
+        block(id, kind, tokens).replacen(
+            r#""role":"assistant""#,
+            &format!(r#""role":"assistant","stop_reason":"{stop}""#),
+            1,
+        )
+    }
+
+    #[test]
+    fn the_words_before_a_tool_call_are_not_the_last_word() {
+        let dir = tempfile::tempdir().unwrap();
+        // A reply's text is a line of its own, written before the tool call
+        // it leads up to. Read at that moment it looks like an answer; the
+        // reply says otherwise.
+        let earlier = block("msg_a", "tool_use", 400);
+        let words = block_ending("msg_b", "text", 300, "tool_use");
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -30, PROMPT),
+                ("assistant", -20, &earlier),
+                ("user", -18, RESULT),
+                ("assistant", -12, &words),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW) - chrono::Duration::seconds(11)).unwrap();
+        assert!(summary.pace.is_some(), "a tool call is still to come");
+    }
+
+    #[test]
+    fn a_reply_that_says_it_ended_closes_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        // The thinking that comes before a final answer is a line of its own
+        // too, with no text in it — and already marked as the end.
+        let earlier = block("msg_a", "tool_use", 400);
+        let thought = block_ending("msg_b", "thinking", 300, "end_turn");
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -30, PROMPT),
+                ("assistant", -20, &earlier),
+                ("user", -18, RESULT),
+                ("assistant", -12, &thought),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW) - chrono::Duration::seconds(11)).unwrap();
+        assert_eq!(summary.pace, None);
+    }
+
+    #[test]
+    fn a_summary_in_mid_turn_is_not_where_the_turn_began() {
+        let dir = tempfile::tempdir().unwrap();
+        // A long conversation is cut down to a summary while the turn is
+        // going, and the summary is written as something the user said.
+        let before = block("msg_a", "tool_use", 500);
+        let after = block("msg_b", "tool_use", 300);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -120, PROMPT),
+                ("assistant", -110, &before),
+                ("user", -108, RESULT),
+                (
+                    "user",
+                    -100,
+                    r#""isCompactSummary":true,"message":{"role":"user","content":"This session is being continued"}"#,
+                ),
+                ("assistant", -90, &after),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW) - chrono::Duration::seconds(88)).unwrap();
+        let pace = summary.pace.unwrap();
+        assert_eq!(pace.turn_tokens, Some(800));
+        assert_eq!(
+            pace.turn_started,
+            Some(at(NOW) - chrono::Duration::seconds(120))
+        );
+    }
+
+    #[test]
+    fn a_line_written_on_the_user_s_behalf_reopens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = block_ending("msg_a", "text", 400, "end_turn");
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -30, PROMPT),
+                ("assistant", -20, &answer),
+                (
+                    "user",
+                    -19,
+                    r#""isMeta":true,"message":{"role":"user","content":"[Image: source: shot.png]"}"#,
+                ),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW) - chrono::Duration::seconds(18)).unwrap();
+        assert_eq!(summary.pace, None);
+    }
+
+    #[test]
+    fn a_reply_that_thinks_for_a_minute_is_still_under_way() {
+        let dir = tempfile::tempdir().unwrap();
+        // A tool answered a minute ago and the model has written nothing
+        // since: by the clock the session looks finished, by the transcript
+        // a reply is owed. The speed of the turn so far stays.
+        let reply = block("msg_a", "tool_use", 500);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -90, PROMPT),
+                ("assistant", -80, &reply),
+                ("user", -75, RESULT),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW)).unwrap();
+        let pace = summary.pace.expect("a reply is still owed");
+        assert!((pace.tokens_per_sec - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn an_answer_with_no_tool_call_ends_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        // Talk-only turns get no end-of-turn record, but the model having the
+        // last word is the end: nothing follows an answer.
+        let answer = r#""message":{"id":"msg_a","role":"assistant","usage":{"output_tokens":400},"content":[{"type":"text","text":"done"}]}"#;
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[("user", -20, PROMPT), ("assistant", -10, answer)],
+        );
+        let summary = summarise_transcript(&path, at(NOW)).unwrap();
+        assert_eq!(summary.pace, None);
+    }
+
+    #[test]
+    fn a_turn_abandoned_mid_flight_stops_having_a_pace() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = block("msg_a", "tool_use", 500);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -3600, PROMPT),
+                ("assistant", -3590, &reply),
+                ("user", -3585, RESULT),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW)).unwrap();
+        assert_eq!(summary.pace, None);
+    }
+
+    #[test]
+    fn a_turn_with_no_reply_yet_has_no_pace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_transcript(dir.path(), "s.jsonl", &[("user", -3, PROMPT)]);
+        let summary = summarise_transcript(&path, at(NOW)).unwrap();
+        assert_eq!(summary.pace, None);
+    }
+
+    #[test]
+    fn a_finished_turn_shows_no_pace() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = block("msg_a", "text", 400);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                ("user", -120, PROMPT),
+                ("assistant", -110, &reply),
+                ("system", -109, r#""subtype":"turn_duration""#),
+            ],
+        );
+        let summary = summarise_transcript(&path, at(NOW)).unwrap();
+        assert_eq!(summary.pace, None);
+    }
+
+    #[test]
+    fn two_chats_at_once_keep_a_speed_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        // Two sessions working at the same moment, one four times as fast.
+        let fast = block("msg_fast", "tool_use", 800);
+        let slow = block("msg_slow", "tool_use", 200);
+        write_transcript(
+            &projects,
+            "fast.jsonl",
+            &[("user", -12, PROMPT), ("assistant", -2, &fast)],
+        );
+        write_transcript(
+            &projects,
+            "slow.jsonl",
+            &[("user", -12, PROMPT), ("assistant", -2, &slow)],
+        );
+
+        let adapter = ClaudeAdapter::with_paths(
+            reqwest::Client::new(),
+            ClaudePaths {
+                root: dir.path().to_path_buf(),
+            },
+        );
+        let sessions = adapter.scan_sessions(at(NOW));
+        let speed = |id: &str| {
+            sessions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.tokens_per_sec)
+                .unwrap()
+        };
+        // Each its own, and nowhere the 100 a second the two add up to.
+        assert!((speed("fast") - 80.0).abs() < 0.01);
+        assert!((speed("slow") - 20.0).abs() < 0.01);
+        assert!(sessions
+            .iter()
+            .all(|s| s.tokens_per_sec.is_none_or(|v| v < 99.0)));
     }
 
     #[test]

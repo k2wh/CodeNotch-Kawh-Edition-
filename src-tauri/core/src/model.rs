@@ -498,6 +498,17 @@ pub struct Session {
     /// app a click on the session brings to the front; see [`host_processes`].
     #[serde(default)]
     pub host: Option<String>,
+    /// How fast this session is writing, in output tokens a second over the
+    /// last few replies of the turn under way. This session's own: with
+    /// several chats working at once each has its speed, and none is a sum.
+    #[serde(default)]
+    pub tokens_per_sec: Option<f32>,
+    /// Output tokens written since the turn under way began.
+    #[serde(default)]
+    pub turn_tokens: Option<u64>,
+    /// When that turn began.
+    #[serde(default)]
+    pub turn_started: Option<DateTime<Utc>>,
 }
 
 impl Session {
@@ -512,6 +523,9 @@ impl Session {
             tokens: None,
             detail: None,
             host: None,
+            tokens_per_sec: None,
+            turn_tokens: None,
+            turn_started: None,
         }
     }
 }
