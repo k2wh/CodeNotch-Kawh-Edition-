@@ -59,7 +59,8 @@ pub struct HudMetrics {
     /// silhouette's curve runs 1.21x the thickness and so reaches into the
     /// first slot, exactly as the reference does — a ring is inset far enough
     /// from the strip's sides that the last percent of the taper never clips
-    /// it.
+    /// it. That holds on a left/right edge; a top/bottom one needs more, see
+    /// `stack_padding`.
     pub strip_padding: f64,
     /// Diameter of a provider's ring.
     pub ring: f64,
@@ -84,6 +85,26 @@ impl HudMetrics {
     /// weekly label.
     pub fn stack_depth(&self) -> f64 {
         self.ring * (1.0 + 0.355 + 0.17) + 29.0
+    }
+
+    /// Padding at each end of a top/bottom strip as deep as `strip_thickness`.
+    ///
+    /// The taper is as long as the strip is deep, and what stands in it there
+    /// is no longer a ring in the middle of the thickness but a column filling
+    /// the depth. With a side strip's padding the curve cuts the corner off
+    /// the first weekly label on a top strip, all but touches the first ring
+    /// on a bottom one, and leaves the settings gear at the far end hanging
+    /// outside the black.
+    ///
+    /// So the first column starts one thickness along the strip. The
+    /// silhouette is within a pixel or two of its full depth by then, which
+    /// leaves that column as clear of the curve as the others are of the
+    /// strip's straight side.
+    ///
+    /// Whole pixels, so the strip's length is whole too and the silhouette,
+    /// which is drawn to whole pixels, ends where the strip does.
+    pub fn stack_padding(&self) -> f64 {
+        (self.strip_thickness - (self.slot - self.ring) / 2.0).round()
     }
 
     /// Resting size of the strip holding `providers` rings, as
@@ -482,6 +503,9 @@ impl Config {
             // A ring's column stacks across a top/bottom strip, so the strip
             // has to be deep enough to hold all of it. See `stack_depth`.
             metrics.strip_thickness = metrics.stack_depth().max(metrics.strip_thickness);
+            // ...and longer at its ends: the taper grew with the depth, and a
+            // column can't start inside it. See `stack_padding`.
+            metrics.strip_padding = metrics.stack_padding().max(metrics.strip_padding);
         }
         metrics
     }

@@ -286,6 +286,43 @@ mod tests {
     }
 
     #[test]
+    fn a_top_edge_strip_keeps_its_columns_out_of_the_taper() {
+        // The silhouette curves in over 1.21x the strip's depth and is only
+        // within a pixel or two of all of it a full thickness along. A column
+        // stacked across the strip fills that depth, so it has to start
+        // there; with a side strip's padding the curve cuts the corner off
+        // the first ring's weekly label.
+        for size in [HudSize::Small, HudSize::Medium, HudSize::Large] {
+            for edge in [Edge::Top, Edge::Bottom] {
+                let m = Config {
+                    size,
+                    edge,
+                    ..Config::default()
+                }
+                .metrics();
+                let column = m.strip_padding + (m.slot - m.ring) / 2.0;
+                assert!(
+                    // Give or take the half pixel the padding is rounded by.
+                    column >= m.strip_thickness - 0.5,
+                    "{size:?} {edge:?}: the first column starts {column} along a strip {} deep",
+                    m.strip_thickness
+                );
+                assert_eq!(m.strip_padding.fract(), 0.0, "{size:?}: whole pixels");
+            }
+            // A side strip's ring sits mid-thickness, clear of the curve as it
+            // was: nothing about it changes.
+            for edge in [Edge::Left, Edge::Right] {
+                let side = Config {
+                    size,
+                    edge,
+                    ..Config::default()
+                };
+                assert_eq!(side.metrics(), size.metrics());
+            }
+        }
+    }
+
+    #[test]
     fn a_growing_window_keeps_the_strip_still() {
         // Right edge, centred, a 300px strip. Opening a 560px card must not
         // move the strip on screen.
