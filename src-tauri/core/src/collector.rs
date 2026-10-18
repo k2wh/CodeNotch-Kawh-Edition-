@@ -8,11 +8,14 @@
 //! [`Health::Stale`] rather than quietly presented as current.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
+use crate::adapters::claude::SessionOwners;
 use crate::adapters::StoredBackoff;
-use crate::adapters::{claude, codex, home_dir};
+use crate::adapters::{claude, codex, home_dir, resolved};
 use crate::adapters::{
     claude::ClaudeAdapter, codex::CodexAdapter, commandcode::CommandCodeAdapter,
     copilot::CopilotAdapter, cursor::CursorAdapter, gemini::GeminiAdapter, glm::GlmAdapter,
@@ -99,10 +102,14 @@ pub struct Collector {
     /// Last transcript write seen per provider, so the activity pass only
     /// re-reads files that actually changed.
     activity_marks: BTreeMap<String, std::time::SystemTime>,
-    /// What a provider's own hooks last reported, and when. While these keep
+    /// What each ring's own hooks last reported, and when. While these keep
     /// coming they outrank the transcripts: an agent saying "I've stopped"
     /// beats a file that was written a second ago.
-    reported: BTreeMap<ProviderId, (Activity, DateTime<Utc>)>,
+    reported: BTreeMap<String, (Activity, DateTime<Utc>)>,
+    /// Which Claude account the hooks saw running each session. Where two
+    /// accounts share a folder of conversations, this is the one word on
+    /// whose a conversation is that is never a guess; see [`SessionOwners`].
+    hook_runs: SessionOwners,
     /// Tokens spent, per provider, so a percentage can be turned into an
     /// amount. See [`crate::ledger`] and [`crate::estimate`].
     ledgers: BTreeMap<String, Ledger>,
@@ -116,6 +123,66 @@ pub struct Collector {
     /// Rate-limit penalties from the previous run, until the adapter that
     /// owns each one is built and takes it back.
     penalties: BTreeMap<String, StoredBackoff>,
+}
+
+/// Every account of a tool that keeps one per folder, as (ring, folder).
+fn account_roots(id: ProviderId) -> Vec<(String, PathBuf)> {
+    match id {
+        ProviderId::ClaudeCode => claude::accounts()
+            .into_iter()
+            .map(|(name, paths)| (instance_key(id, name.as_deref()), paths.root))
+            .collect(),
+        ProviderId::Codex => home_dir()
+            .map(|home| codex::discover_profiles(&home))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|profile| (instance_key(id, profile.name.as_deref()), profile.root))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The ring a hook's event is about, and that account's folder (resolved).
+///
+/// A hook runs inside the agent, so it knows the folder the agent was
+/// pointed at, or that it wasn't pointed anywhere and uses its default.
+/// That folder is the account. One the notch draws no ring for is none of
+/// its business, unless there is only the one ring it could be.
+fn hook_account(id: ProviderId, home: Option<&str>) -> Option<(String, Option<PathBuf>)> {
+    let default = match id {
+        ProviderId::ClaudeCode => ".claude",
+        ProviderId::Codex => ".codex",
+        _ => return Some((id.key().to_string(), None)),
+    };
+    let accounts = account_roots(id);
+    if accounts.is_empty() {
+        // No account folder found at all: the tool's one ring, as before.
+        return Some((id.key().to_string(), None));
+    }
+    hook_account_in(accounts, home_dir(), default, home)
+}
+
+/// The testable half of [`hook_account`]: the accounts there are, the home
+/// folder, the tool's default folder in it, and what the hook said.
+fn hook_account_in(
+    accounts: Vec<(String, PathBuf)>,
+    user: Option<PathBuf>,
+    default: &str,
+    home: Option<&str>,
+) -> Option<(String, Option<PathBuf>)> {
+    let folder = match home.map(str::trim).filter(|home| !home.is_empty()) {
+        Some(home) => match (home.strip_prefix('~'), &user) {
+            (Some(rest), Some(user)) => user.join(rest.trim_start_matches(['/', '\\'])),
+            _ => PathBuf::from(home),
+        },
+        None => user?.join(default),
+    };
+    let folder = resolved(&folder);
+    let matched = accounts
+        .iter()
+        .find(|(_, root)| resolved(root) == folder)
+        .or_else(|| (accounts.len() == 1).then(|| &accounts[0]));
+    matched.map(|(instance, root)| (instance.clone(), Some(resolved(root))))
 }
 
 /// How often the ledger and estimates are written to disk. Often enough that
@@ -177,6 +244,7 @@ impl Collector {
             refresh_all: true,
             activity_marks: BTreeMap::new(),
             reported: BTreeMap::new(),
+            hook_runs: SessionOwners::default(),
             ledgers: BTreeMap::new(),
             vouched: BTreeMap::new(),
             estimator: Estimator::default(),
@@ -270,6 +338,10 @@ impl Collector {
         account: Option<&str>,
         now: DateTime<Utc>,
     ) -> ProviderSnapshot {
+        // Read before the adapter is borrowed.
+        let owners = (id == ProviderId::ClaudeCode)
+            .then(|| self.claude_owners())
+            .flatten();
         let snapshot = match id {
             ProviderId::ClaudeCode => {
                 let adapter = match self.claude.get_mut(instance) {
@@ -295,6 +367,7 @@ impl Collector {
                         self.claude.entry(instance.to_string()).or_insert(adapter)
                     }
                 };
+                adapter.set_owners(owners);
                 adapter.collect(now).await
             }
             ProviderId::Codex => {
@@ -348,6 +421,16 @@ impl Collector {
         // wrong — it counted a repeated message once per line. When that is
         // what's on disk, the sizes it taught the estimator go with it.
         let mut trustworthy = true;
+        // Where two Claude accounts share a folder of conversations, a ledger
+        // kept before the two were told apart counted the other's spending
+        // as well as its own. Those start again, and so does what was learned
+        // from them.
+        let roots: Vec<PathBuf> = claude::accounts()
+            .into_iter()
+            .map(|(_, paths)| paths.root)
+            .collect();
+        let shared = roots.len() > 1 && claude::shares_transcripts(&roots);
+        let mut recounted = Vec::new();
         if let Some(path) = ledger::state_path("token-ledger.json") {
             if let Some(stored) = read_json::<BTreeMap<String, StoredLedger>>(&path) {
                 trustworthy = stored.values().all(Ledger::is_current);
@@ -355,9 +438,17 @@ impl Collector {
                     // Keys used to be a provider; they are a ring now, and an
                     // old file's plain provider key is this tool's default
                     // account, which is what it always was.
-                    if provider_of(&key).is_some() {
-                        self.ledgers.insert(key, Ledger::from_stored(entry, now));
+                    let Some(id) = provider_of(&key) else {
+                        continue;
+                    };
+                    if shared && id == ProviderId::ClaudeCode && !entry.counted_by_account() {
+                        let mut fresh = Ledger::default();
+                        fresh.prune(now);
+                        self.ledgers.insert(key.clone(), fresh);
+                        recounted.push(key);
+                        continue;
                     }
+                    self.ledgers.insert(key, Ledger::from_stored(entry, now));
                 }
             }
         }
@@ -372,6 +463,9 @@ impl Collector {
                     self.estimator = estimator;
                 }
             }
+        }
+        for key in &recounted {
+            self.estimator.forget(key);
         }
     }
 
@@ -451,13 +545,21 @@ impl Collector {
         ledger.start(now);
         for path in paths {
             match id {
-                ProviderId::ClaudeCode => ledger.follow(
-                    &path,
-                    weights,
-                    claude::line_stamp,
-                    claude::line_usage,
-                    claude::line_model,
-                ),
+                ProviderId::ClaudeCode => {
+                    let Some(adapter) = self.claude.get(instance) else {
+                        break;
+                    };
+                    // In a folder another account can see, only the lines
+                    // this one wrote.
+                    ledger.follow_only(
+                        &path,
+                        weights,
+                        claude::line_stamp,
+                        claude::line_usage,
+                        claude::line_model,
+                        adapter.spends(&path),
+                    )
+                }
                 _ => ledger.follow(
                     &path,
                     weights,
@@ -574,42 +676,66 @@ impl Collector {
 
     /// An agent reported what it is doing through its own hook.
     ///
-    /// Returns true when this changes what's on screen.
+    /// `home` is the folder the agent was pointed at, when it was pointed
+    /// somewhere (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`): which account it is.
+    /// `session` is the conversation. Returns true when this changes what's
+    /// on screen.
     pub fn report_activity(
         &mut self,
         id: ProviderId,
+        home: Option<&str>,
+        session: Option<&str>,
         activity: Activity,
         now: DateTime<Utc>,
     ) -> bool {
-        self.reported.insert(id, (activity, now));
-
-        // A hook says which tool it is, never which account, so its word
-        // covers every ring of that tool.
-        let mut changed = false;
-        for (instance, entry) in self.cache.iter_mut() {
-            if provider_of(instance) != Some(id) || !self.config.is_enabled(instance) {
-                continue;
-            }
-            if entry.snapshot.activity == activity {
-                continue;
-            }
-            entry.snapshot.activity = activity;
-            changed = true;
-            // The card lists sessions: move the liveliest one with the provider,
-            // so a ring saying "finished" doesn't sit above a session that still
-            // claims to be working.
-            if let Some(session) = entry.snapshot.sessions.first_mut() {
-                session.activity = activity;
-            }
+        let Some((instance, root)) = hook_account(id, home) else {
+            return false;
+        };
+        if let (ProviderId::ClaudeCode, Some(session), Some(root)) = (id, session, &root) {
+            self.hook_runs.observe(session, root, now);
         }
-        changed
+        self.reported.insert(instance.clone(), (activity, now));
+
+        if !self.config.is_enabled(&instance) {
+            return false;
+        }
+        let Some(entry) = self.cache.get_mut(&instance) else {
+            return false;
+        };
+        if entry.snapshot.activity == activity {
+            return false;
+        }
+        entry.snapshot.activity = activity;
+        // The card lists sessions: move the liveliest one with the provider,
+        // so a ring saying "finished" doesn't sit above a session that still
+        // claims to be working.
+        if let Some(session) = entry.snapshot.sessions.first_mut() {
+            session.activity = activity;
+        }
+        true
     }
 
-    /// Whether this provider's hooks are talking to us right now.
-    fn reporting(&self, id: ProviderId, now: DateTime<Utc>) -> bool {
-        self.reported.get(&id).is_some_and(|(_, at)| {
+    /// Whether this ring's hooks are talking to us right now.
+    fn reporting(&self, instance: &str, now: DateTime<Utc>) -> bool {
+        self.reported.get(instance).is_some_and(|(_, at)| {
             now.signed_duration_since(*at) < chrono::Duration::minutes(REPORTED_FOR_MINS)
         })
+    }
+
+    /// Who ran which session, where Claude accounts share a folder of
+    /// conversations; `None` with only the one account, whose every
+    /// conversation is its own.
+    fn claude_owners(&self) -> Option<Arc<SessionOwners>> {
+        let roots: Vec<PathBuf> = claude::accounts()
+            .into_iter()
+            .map(|(_, paths)| paths.root)
+            .collect();
+        if roots.len() < 2 {
+            return None;
+        }
+        let mut owners = SessionOwners::read(&roots);
+        owners.absorb(&self.hook_runs);
+        Some(Arc::new(owners))
     }
 
     /// Re-read what the local agents are doing, without touching the network.
@@ -634,6 +760,8 @@ impl Collector {
                     .then(|| (instance.clone(), id))
             })
             .collect();
+        // Who ran which session, read once a Claude ring needs a re-scan.
+        let mut owners: Option<Option<Arc<SessionOwners>>> = None;
 
         for (instance, id) in watched {
             if !self.config.is_enabled(&instance) {
@@ -653,10 +781,16 @@ impl Collector {
             self.activity_marks.insert(instance.clone(), mark);
 
             let sessions = match id {
-                ProviderId::ClaudeCode => match self.claude.get(&instance) {
-                    Some(adapter) => adapter.scan_sessions(now),
-                    None => continue,
-                },
+                ProviderId::ClaudeCode => {
+                    let owners = owners.get_or_insert_with(|| self.claude_owners()).clone();
+                    match self.claude.get_mut(&instance) {
+                        Some(adapter) => {
+                            adapter.set_owners(owners);
+                            adapter.scan_sessions(now)
+                        }
+                        None => continue,
+                    }
+                }
                 _ => match self.codex.get(&instance) {
                     Some(adapter) => adapter.scan_sessions(now),
                     None => continue,
@@ -669,7 +803,7 @@ impl Collector {
             // With hooks reporting, the transcripts still supply titles and
             // token counts but no longer get a vote on the activity.
             let activity = if let Some((reported, _)) =
-                self.reported.get(&id).copied().filter(|(_, at)| {
+                self.reported.get(&instance).copied().filter(|(_, at)| {
                     now.signed_duration_since(*at) < chrono::Duration::minutes(REPORTED_FOR_MINS)
                 }) {
                 reported
@@ -716,10 +850,8 @@ impl Collector {
             self.account(&instance, id, &mut snapshot, now);
 
             // See `refresh_activity`: a hook's word outranks a re-read file.
-            // A hook can't say which account it is, so its word covers every
-            // ring of that tool.
-            if let Some((reported, _)) = self.reported.get(&id).copied() {
-                if self.reporting(id, now) && snapshot.health != Health::Unavailable {
+            if let Some((reported, _)) = self.reported.get(&instance).copied() {
+                if self.reporting(&instance, now) && snapshot.health != Health::Unavailable {
                     snapshot.activity = reported;
                 }
             }
@@ -756,6 +888,9 @@ impl Collector {
         }
 
         self.refresh_all = false;
+        // The ledgers keep eight days; whose a line was matters no longer.
+        self.hook_runs
+            .forget_before(now - chrono::Duration::days(8));
         let telemetry = self.telemetry(now);
         self.save_state(now, &telemetry);
         (telemetry, alerts)
@@ -848,6 +983,52 @@ fn cap_shorter_windows(windows: &mut [UsageWindow]) {
 mod tests {
     use super::*;
     use crate::config::PollConfig;
+
+    #[test]
+    fn a_hook_s_event_goes_to_the_account_whose_folder_the_agent_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().to_path_buf();
+        let own = user.join(".claude");
+        let work = user.join(".claude-work");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let accounts = vec![
+            ("claudeCode".to_string(), own.clone()),
+            ("claudeCode:work".to_string(), work.clone()),
+        ];
+        let ring = |home: Option<&str>| {
+            hook_account_in(accounts.clone(), Some(user.clone()), ".claude", home)
+                .map(|(ring, _)| ring)
+        };
+
+        // Not pointed anywhere: the default account.
+        assert_eq!(ring(None).as_deref(), Some("claudeCode"));
+        assert_eq!(ring(Some("  ")).as_deref(), Some("claudeCode"));
+        // Pointed at the work account's folder, however it was written.
+        assert_eq!(
+            ring(Some(&work.to_string_lossy())).as_deref(),
+            Some("claudeCode:work")
+        );
+        assert_eq!(
+            ring(Some("~/.claude-work")).as_deref(),
+            Some("claudeCode:work")
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            ring(Some(
+                &work.to_string_lossy().replace('\\', "/").to_uppercase()
+            ))
+            .as_deref(),
+            Some("claudeCode:work")
+        );
+        // An account the notch draws no ring for.
+        assert_eq!(ring(Some(&user.join("elsewhere").to_string_lossy())), None);
+
+        // With only the one ring, every event is its.
+        let one = vec![("claudeCode".to_string(), own.clone())];
+        let only = hook_account_in(one, Some(user.clone()), ".claude", Some("D:/odd"));
+        assert_eq!(only.map(|(ring, _)| ring).as_deref(), Some("claudeCode"));
+    }
 
     /// The five-hour window can't be worth more than the week it sits inside,
     /// which is what a fit against a barely-started window kept claiming.

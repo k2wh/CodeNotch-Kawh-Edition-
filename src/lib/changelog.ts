@@ -21,6 +21,27 @@ export interface Release {
 
 export const CHANGELOG: Release[] = [
   {
+    version: "0.2.6",
+    date: "2026-10-18",
+    changes: {
+      en: [
+        "Two Claude accounts on one computer stay apart: each ring shows only its own account's conversations, speed and spending, even where the two share a project's folder of conversations.",
+        "One account working no longer lights up the other's ring: what Claude Code tells the notch now says which account it comes from.",
+        "Where two accounts share conversations, this version starts each one's token count again, because the last one added the two together. The totals come back as the 5-hour and weekly windows roll over.",
+      ],
+      pt: [
+        "Duas contas do Claude no mesmo computador ficam separadas: cada anel mostra só as conversas, a velocidade e o gasto da própria conta, mesmo quando as duas compartilham a pasta de conversas de um projeto.",
+        "Uma conta trabalhando não acende mais o anel da outra: o aviso que o Claude Code manda ao notch agora diz de qual conta ele veio.",
+        "Onde duas contas compartilham conversas, esta versão recomeça a contagem de tokens de cada uma, porque a anterior somava as duas. Os totais voltam a aparecer conforme as janelas de 5 horas e da semana viram.",
+      ],
+      es: [
+        "Dos cuentas de Claude en el mismo ordenador quedan separadas: cada anillo muestra solo las conversaciones, la velocidad y el gasto de su propia cuenta, aunque las dos compartan la carpeta de conversaciones de un proyecto.",
+        "Una cuenta trabajando ya no enciende el anillo de la otra: el aviso que Claude Code manda al notch ahora dice de qué cuenta viene.",
+        "Donde dos cuentas comparten conversaciones, esta versión vuelve a empezar el recuento de tokens de cada una, porque la anterior sumaba las dos. Los totales vuelven a aparecer a medida que cambian las ventanas de 5 horas y de la semana.",
+      ],
+    },
+  },
+  {
     version: "0.2.5",
     date: "2026-10-06",
     changes: {

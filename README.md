@@ -51,6 +51,10 @@ Compared with the Windows port it started from:
   so one account's spending is never counted against another's limit. An
   account switched off stays in settings to be switched back on, and an extra
   Claude account only ever uses its own login.
+- Accounts kept apart even when they share a project's conversations through
+  a linked folder: each conversation, and each line of one picked up by the
+  other account, goes to the account that ran it, from Claude Code's own
+  records and from the hooks, which say which account they come from.
 
 **Tokens, and what a plan returns**
 

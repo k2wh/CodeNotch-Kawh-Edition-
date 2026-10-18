@@ -298,6 +298,26 @@ impl Ledger {
         U: Fn(&str) -> Option<Usage>,
         M: Fn(&str) -> Option<String>,
     {
+        self.follow_only(path, weights, stamp, usage, model_of, |_| true);
+    }
+
+    /// [`Ledger::follow`], counting only the lines `keep` says are this
+    /// ledger's, by when they were written. A transcript two accounts can see
+    /// is read by both, and each counts what it spent.
+    pub fn follow_only<U, S, M, K>(
+        &mut self,
+        path: &Path,
+        weights: Weights,
+        stamp: S,
+        usage: U,
+        model_of: M,
+        keep: K,
+    ) where
+        S: Fn(&str) -> Option<DateTime<Utc>>,
+        U: Fn(&str) -> Option<Usage>,
+        M: Fn(&str) -> Option<String>,
+        K: Fn(DateTime<Utc>) -> bool,
+    {
         let key = path.to_string_lossy().to_string();
         let Ok(mut file) = std::fs::File::open(path) else {
             return;
@@ -341,6 +361,9 @@ impl Ledger {
             }
             let Some(usage) = usage(line) else { continue };
             let at = stamp(line).unwrap_or_else(Utc::now);
+            if !keep(at) {
+                continue;
+            }
 
             let mut split = Split {
                 input: usage.input,
@@ -408,6 +431,20 @@ pub struct StoredLedger {
     /// away rather than blended with figures that are right.
     #[serde(default)]
     version: u32,
+    /// Counted by a reader that tells two accounts' lines apart in a
+    /// transcript both can see. Only matters where they do; see
+    /// [`StoredLedger::counted_by_account`].
+    #[serde(default)]
+    by_account: bool,
+}
+
+impl StoredLedger {
+    /// Whether every line in here is this account's own. A ledger kept
+    /// before accounts were told apart holds the other account's spending
+    /// too, wherever the two share a folder of conversations.
+    pub fn counted_by_account(&self) -> bool {
+        self.by_account
+    }
 }
 
 /// Bumped whenever a stored ledger's numbers stop meaning what they used to.
@@ -422,6 +459,7 @@ impl Ledger {
             days: self.days.clone(),
             models: self.marks.models.clone(),
             version: LEDGER_VERSION,
+            by_account: true,
         }
     }
 
@@ -506,6 +544,35 @@ mod tests {
     /// otherwise by wrapping this.
     fn no_model(_line: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn a_transcript_two_accounts_see_is_counted_by_each_for_its_own_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        write(
+            &path,
+            &[
+                format!("{} 100 0 0 0", at(0).timestamp()),
+                format!("{} 200 0 0 0", at(10).timestamp()),
+            ],
+        );
+        // The conversation changed hands between the two lines.
+        let switch = at(5);
+        let mut first = Ledger::default();
+        let mut second = Ledger::default();
+        first.follow_only(&path, Weights::CLAUDE, stamp, usage, no_model, |when| {
+            when < switch
+        });
+        second.follow_only(&path, Weights::CLAUDE, stamp, usage, no_model, |when| {
+            when >= switch
+        });
+        assert_eq!(first.since(at(-60)), 100.0);
+        assert_eq!(second.since(at(-60)), 200.0);
+
+        // Kept that way, and saying so; one kept before doesn't.
+        assert!(first.stored().counted_by_account());
+        assert!(!StoredLedger::default().counted_by_account());
     }
 
     fn write(path: &Path, lines: &[String]) {

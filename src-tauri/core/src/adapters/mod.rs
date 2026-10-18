@@ -221,54 +221,75 @@ pub fn tail_lines(path: &Path, max_bytes: u64) -> std::io::Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Files under `dir` with the given extension, newest modification first.
+/// Every file under `dir` with the given extension, and when it was written.
 ///
-/// Recurses (agent tools nest transcripts per project) and never follows
-/// symlinks, so a stray link can't send us wandering the filesystem.
-/// When anything under `dir` with this extension was last written.
-///
-/// A cheap way to ask "has an agent written anything since I last looked?"
-/// without re-reading and re-parsing every transcript.
-pub fn newest_mtime(dir: &Path, extension: &str) -> Option<std::time::SystemTime> {
-    if !dir.is_dir() {
-        return None;
-    }
-    walkdir::WalkDir::new(dir)
-        .max_depth(4)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|x| x.eq_ignore_ascii_case(extension))
+/// Recurses, since agent tools nest transcripts per project. `follow_links`
+/// says whether a linked folder is gone into as well; the walker catches a
+/// link that loops back on itself, and the depth limit holds either way.
+fn files_under(
+    dir: &Path,
+    extension: &str,
+    follow_links: bool,
+) -> impl Iterator<Item = (std::time::SystemTime, PathBuf)> {
+    let extension = extension.to_string();
+    dir.is_dir()
+        .then(|| {
+            walkdir::WalkDir::new(dir)
+                .max_depth(4)
+                .follow_links(follow_links)
         })
-        .filter_map(|e| e.metadata().ok()?.modified().ok())
-        .max()
-}
-
-pub fn newest_files(dir: &Path, extension: &str, limit: usize) -> Vec<PathBuf> {
-    if !dir.is_dir() {
-        return Vec::new();
-    }
-    let mut found: Vec<(std::time::SystemTime, PathBuf)> = walkdir::WalkDir::new(dir)
-        .max_depth(4)
-        .follow_links(false)
         .into_iter()
+        .flatten()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| {
+        .filter(move |e| {
             e.path()
                 .extension()
-                .is_some_and(|x| x.eq_ignore_ascii_case(extension))
+                .is_some_and(|x| x.eq_ignore_ascii_case(&extension))
         })
         .filter_map(|e| {
             let modified = e.metadata().ok()?.modified().ok()?;
             Some((modified, e.into_path()))
         })
-        .collect();
+}
 
+/// When anything under `dir` with this extension was last written.
+///
+/// A cheap way to ask "has an agent written anything since I last looked?"
+/// without re-reading and re-parsing every transcript. Never follows links,
+/// so a stray one can't send us wandering the filesystem.
+pub fn newest_mtime(dir: &Path, extension: &str) -> Option<std::time::SystemTime> {
+    files_under(dir, extension, false).map(|(at, _)| at).max()
+}
+
+/// Files under `dir` with the given extension, newest modification first.
+///
+/// Never follows links, so a stray one can't send us wandering the
+/// filesystem.
+pub fn newest_files(dir: &Path, extension: &str, limit: usize) -> Vec<PathBuf> {
+    newest(files_under(dir, extension, false), limit)
+}
+
+/// [`newest_mtime`], going into linked folders too.
+///
+/// For a tool whose folders are linked together on purpose: Claude Code
+/// accounts can share a project's conversations through a link from one
+/// account's folder into the other's, and each then looks for them in its own.
+pub fn newest_mtime_linked(dir: &Path, extension: &str) -> Option<std::time::SystemTime> {
+    files_under(dir, extension, true).map(|(at, _)| at).max()
+}
+
+/// [`newest_files`], going into linked folders too; see
+/// [`newest_mtime_linked`].
+pub fn newest_files_linked(dir: &Path, extension: &str, limit: usize) -> Vec<PathBuf> {
+    newest(files_under(dir, extension, true), limit)
+}
+
+fn newest(
+    found: impl Iterator<Item = (std::time::SystemTime, PathBuf)>,
+    limit: usize,
+) -> Vec<PathBuf> {
+    let mut found: Vec<_> = found.collect();
     found.sort_by_key(|a| std::cmp::Reverse(a.0));
     found.into_iter().take(limit).map(|(_, p)| p).collect()
 }
@@ -276,6 +297,32 @@ pub fn newest_files(dir: &Path, extension: &str, limit: usize) -> Vec<PathBuf> {
 /// The user profile directory (`%USERPROFILE%` on Windows).
 pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
+}
+
+/// A path as one key, however it was spelled or reached: through links, in
+/// the case the disk has it. The spelling itself when it isn't there to ask.
+pub fn resolved(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Make `link` lead to the folder `target`, the way people link folders
+/// together: a junction on Windows, which needs no special rights, a
+/// symbolic link elsewhere.
+#[cfg(test)]
+pub(crate) fn link_dir(target: &Path, link: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
 }
 
 /// A human label for a working directory: its last component.
@@ -492,6 +539,22 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn a_linked_folder_is_only_gone_into_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("a.jsonl"), "{}\n").unwrap();
+        let projects = dir.path().join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        assert!(link_dir(&elsewhere, &projects.join("shared")));
+
+        assert!(newest_files(&projects, "jsonl", 10).is_empty());
+        assert!(newest_mtime(&projects, "jsonl").is_none());
+        assert_eq!(newest_files_linked(&projects, "jsonl", 10).len(), 1);
+        assert!(newest_mtime_linked(&projects, "jsonl").is_some());
     }
 
     #[test]

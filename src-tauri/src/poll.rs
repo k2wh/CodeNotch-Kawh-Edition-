@@ -103,7 +103,13 @@ async fn deliver_hook_events(app: &AppHandle, offset: &mut u64) {
         let mut changed = false;
         for event in events {
             if let (Some(id), Some(activity)) = (event.provider_id(), event.activity()) {
-                changed |= collector.report_activity(id, activity, now);
+                changed |= collector.report_activity(
+                    id,
+                    event.home.as_deref(),
+                    event.session_id.as_deref(),
+                    activity,
+                    now,
+                );
             }
         }
         if !changed {

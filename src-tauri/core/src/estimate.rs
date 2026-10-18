@@ -122,6 +122,14 @@ impl Estimator {
     /// what earlier windows taught us — and nothing at all until one of the
     /// two does. An early window has no answer worth printing, and a made-up
     /// one is worse than a blank.
+    /// Forget everything learned about one ring's windows, when what it was
+    /// learned from turns out to have been wrong.
+    pub fn forget(&mut self, instance: &str) {
+        let prefix = format!("{instance}/");
+        self.live.retain(|key, _| !key.starts_with(&prefix));
+        self.learned.retain(|key, _| !key.starts_with(&prefix));
+    }
+
     pub fn capacity_for(&self, key: &str) -> Option<f64> {
         let live = self
             .live

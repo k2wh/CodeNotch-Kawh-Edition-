@@ -18,15 +18,15 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as Json;
 
 use crate::adapters::{
-    home_dir, newest_files, newest_mtime, pace_of, parse_timestamp, project_label, tail_lines,
-    Backoff, Pace, Reply, TurnMemo,
+    home_dir, newest_files_linked, newest_mtime_linked, pace_of, parse_timestamp, project_label,
+    resolved, tail_lines, Backoff, Pace, Reply, TurnMemo,
 };
 use crate::model::{
     Activity, Health, ProviderId, ProviderSnapshot, Session, UsageUnit, UsageWindow,
@@ -1009,6 +1009,174 @@ pub fn accounts_in(
     found
 }
 
+/// Whether a file or folder name is a session id, which is what Claude Code
+/// names a conversation's transcript after, and the folder its subagents
+/// write into.
+fn is_session_id(name: &str) -> bool {
+    name.len() == 36
+        && name.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// The session a transcript is part of: its own name, or for a subagent's,
+/// the folder of the session that started it.
+pub fn session_of(path: &Path) -> Option<String> {
+    path.file_stem()
+        .into_iter()
+        .chain(path.ancestors().skip(1).take(3).filter_map(Path::file_name))
+        .filter_map(|name| name.to_str())
+        .find(|name| is_session_id(name))
+        .map(str::to_string)
+}
+
+/// Which account ran which session, for transcripts more than one account
+/// can see.
+///
+/// Claude Code keeps each account's conversations under that account's own
+/// folder, but two accounts can share a project's: one links the folder in
+/// from the other, so either can pick up a conversation the other started.
+/// The transcript then says nothing about whose it is, and each line has to
+/// be put down to the account that was running the session when it was
+/// written.
+///
+/// What says so:
+/// - `session-env/<session>`, which an account makes the first time it runs
+///   a session;
+/// - `sessions/<pid>.json`, one per Claude Code running, naming the session
+///   it has open and when it started: a conversation picked up by the other
+///   account is a new process there;
+/// - the hooks, which run inside Claude Code and so know which account's
+///   folder it was pointed at; see [`SessionOwners::observe`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionOwners {
+    /// By session: since when, which account (its folder, resolved), oldest
+    /// first.
+    runs: HashMap<String, Vec<(DateTime<Utc>, PathBuf)>>,
+}
+
+impl SessionOwners {
+    /// What the folders of the accounts at `roots` say.
+    pub fn read(roots: &[PathBuf]) -> Self {
+        let mut owners = Self::default();
+        for root in roots {
+            let account = resolved(root);
+            for entry in std::fs::read_dir(root.join("session-env"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let name = entry.file_name();
+                let Some(session) = name.to_str().filter(|name| is_session_id(name)) else {
+                    continue;
+                };
+                let made = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok());
+                if let Some(made) = made {
+                    owners.push(session, made.into(), &account);
+                }
+            }
+            for entry in std::fs::read_dir(root.join("sessions"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(json) = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Json>(&text).ok())
+                else {
+                    continue;
+                };
+                let session = json.get("sessionId").and_then(Json::as_str);
+                let started = json
+                    .get("startedAt")
+                    .and_then(Json::as_i64)
+                    .and_then(DateTime::from_timestamp_millis);
+                if let (Some(session), Some(started)) = (session, started) {
+                    owners.push(session, started, &account);
+                }
+            }
+        }
+        owners
+    }
+
+    /// The hooks saw the account whose folder is `root` running `session`
+    /// at `at`.
+    pub fn observe(&mut self, session: &str, root: &Path, at: DateTime<Utc>) {
+        if self.owner_at(session, at) != Some(root) {
+            self.push(session, at, root);
+        }
+    }
+
+    fn push(&mut self, session: &str, at: DateTime<Utc>, account: &Path) {
+        let runs = self.runs.entry(session.to_string()).or_default();
+        let at_or_after = runs.partition_point(|(since, _)| *since <= at);
+        runs.insert(at_or_after, (at, account.to_path_buf()));
+    }
+
+    /// The account running `session` at `at`, if anything says. Nothing
+    /// does before the first word of it: an account's folder for a session
+    /// can be cleared out long after, and a conversation older than every
+    /// record left of it is put down to the folder it is really in.
+    pub fn owner_at(&self, session: &str, at: DateTime<Utc>) -> Option<&Path> {
+        let runs = self.runs.get(session)?;
+        let after = runs.partition_point(|(since, _)| *since <= at);
+        after
+            .checked_sub(1)
+            .and_then(|last| runs.get(last))
+            .map(|(_, account)| account.as_path())
+    }
+
+    /// The account that ran `session` last.
+    pub fn owner_now(&self, session: &str) -> Option<&Path> {
+        self.runs
+            .get(session)?
+            .last()
+            .map(|(_, account)| account.as_path())
+    }
+
+    /// Take in what `other` knows as well.
+    pub fn absorb(&mut self, other: &SessionOwners) {
+        for (session, runs) in &other.runs {
+            for (at, account) in runs {
+                self.push(session, *at, account);
+            }
+        }
+    }
+
+    /// Drop what is too old to matter: sessions not heard of since
+    /// `cutoff`, and of the rest, all but what says who had them then.
+    pub fn forget_before(&mut self, cutoff: DateTime<Utc>) {
+        self.runs
+            .retain(|_, runs| runs.last().is_some_and(|(at, _)| *at >= cutoff));
+        for runs in self.runs.values_mut() {
+            let before = runs.partition_point(|(since, _)| *since < cutoff);
+            runs.drain(..before.saturating_sub(1));
+        }
+    }
+}
+
+/// Whether any of the accounts at `roots` sees another's conversations: a
+/// project folder in its `projects` that is really somewhere else.
+pub fn shares_transcripts(roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| {
+        let projects = root.join("projects");
+        let home = resolved(&projects);
+        std::fs::read_dir(&projects)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| !resolved(&entry.path()).starts_with(&home))
+    })
+}
+
 /// Collects Claude Code usage.
 pub struct ClaudeAdapter {
     http: reqwest::Client,
@@ -1037,6 +1205,13 @@ pub struct ClaudeAdapter {
     /// the sessions are scanned through a shared reference, and a long turn's
     /// totals have to outlive the look that last saw its beginning.
     turns: Mutex<HashMap<PathBuf, TurnMemo>>,
+    /// This account's folder, resolved, to tell the transcripts really in it
+    /// from ones linked in from another account's. See [`SessionOwners`].
+    root: Option<PathBuf>,
+    /// Who ran which session, while another account can see the same
+    /// transcripts. `None` when this is the only account: then every
+    /// transcript it can see is its own.
+    owners: Option<Arc<SessionOwners>>,
 }
 
 impl ClaudeAdapter {
@@ -1051,7 +1226,10 @@ impl ClaudeAdapter {
             shared_store: true,
             app_usage: app_usage_file(),
             turns: Mutex::default(),
+            root: None,
+            owners: None,
         }
+        .rooted()
     }
 
     /// Sign in with this account's own credentials file or not at all (see
@@ -1083,6 +1261,66 @@ impl ClaudeAdapter {
             shared_store: true,
             app_usage: app_usage_file(),
             turns: Mutex::default(),
+            root: None,
+            owners: None,
+        }
+        .rooted()
+    }
+
+    fn rooted(mut self) -> Self {
+        self.root = self.paths.as_ref().map(|paths| resolved(&paths.root));
+        self
+    }
+
+    /// Who ran which session, across every account the collector knows of;
+    /// `None` when this is the only one.
+    pub fn set_owners(&mut self, owners: Option<Arc<SessionOwners>>) {
+        self.owners = owners;
+    }
+
+    /// Whether the transcript at `path` is this account's: one that is
+    /// really in its folder, or one it ran. Asked about the moment `at`, or
+    /// with `None` about now.
+    fn owns(&self, path: &Path, at: Option<DateTime<Utc>>) -> bool {
+        let Some(owners) = &self.owners else {
+            return true;
+        };
+        let owner = session_of(path).and_then(|session| match at {
+            Some(at) => owners.owner_at(&session, at).map(Path::to_path_buf),
+            None => owners.owner_now(&session).map(Path::to_path_buf),
+        });
+        match owner {
+            Some(owner) => self.root.as_deref() == Some(owner.as_path()),
+            // Nothing says who ran it: whoever's folder it is really in.
+            None => self.holds(path),
+        }
+    }
+
+    /// Whether `path` is really in this account's folder, rather than in
+    /// another's that this one links to.
+    fn holds(&self, path: &Path) -> bool {
+        self.root
+            .as_ref()
+            .is_none_or(|root| resolved(path).starts_with(root))
+    }
+
+    /// Which of the lines in the transcript at `path` are this account's
+    /// spending, by when they were written: every one of them, unless
+    /// another account can see the same transcript.
+    pub fn spends(&self, path: &Path) -> impl Fn(DateTime<Utc>) -> bool + '_ {
+        let session = self.owners.as_ref().and_then(|_| session_of(path));
+        let held = self.owners.is_some() && self.holds(path);
+        move |at| {
+            let Some(owners) = &self.owners else {
+                return true;
+            };
+            match session
+                .as_deref()
+                .and_then(|session| owners.owner_at(session, at))
+            {
+                Some(owner) => self.root.as_deref() == Some(owner),
+                None => held,
+            }
         }
     }
 
@@ -1196,12 +1434,13 @@ impl ClaudeAdapter {
         Ok(Some(windows))
     }
 
-    /// Scan local transcripts for sessions and their live state.
-    /// The transcripts worth following for token spending.
+    /// The transcripts worth following for token spending: every one this
+    /// account can see, a project folder linked in from another account's
+    /// included. Whose each line is, is [`ClaudeAdapter::spends`].
     pub fn transcripts(&self) -> Vec<PathBuf> {
         self.paths
             .as_ref()
-            .map(|paths| newest_files(&paths.projects_dir(), "jsonl", MAX_TRANSCRIPTS))
+            .map(|paths| newest_files_linked(&paths.projects_dir(), "jsonl", MAX_TRANSCRIPTS))
             .unwrap_or_default()
     }
 
@@ -1209,7 +1448,7 @@ impl ClaudeAdapter {
     /// would tell us anything new.
     pub fn activity_mark(&self) -> Option<std::time::SystemTime> {
         let paths = self.paths.as_ref()?;
-        newest_mtime(&paths.projects_dir(), "jsonl")
+        newest_mtime_linked(&paths.projects_dir(), "jsonl")
     }
 
     pub fn scan_sessions(&self, now: DateTime<Utc>) -> Vec<Session> {
@@ -1218,7 +1457,14 @@ impl ClaudeAdapter {
         };
         let cutoff = now - chrono::Duration::hours(SESSION_WINDOW_HOURS);
 
-        let transcripts = newest_files(&paths.projects_dir(), "jsonl", MAX_TRANSCRIPTS);
+        // This account's own sessions: a conversation another account is
+        // running in a shared folder is that account's to show.
+        let transcripts: Vec<PathBuf> =
+            newest_files_linked(&paths.projects_dir(), "jsonl", MAX_TRANSCRIPTS * 3)
+                .into_iter()
+                .filter(|path| self.owns(path, None))
+                .take(MAX_TRANSCRIPTS)
+                .collect();
         // A poisoned lock only means a scan panicked half-way; what it holds
         // is still each turn as last seen.
         let mut turns = self.turns.lock().unwrap_or_else(|held| held.into_inner());
@@ -1479,6 +1725,193 @@ mod tests {
     }
 
     const NOW: &str = "2026-01-01T12:00:00Z";
+
+    const MINE: &str = "11111111-1111-4111-8111-111111111111";
+    const THEIRS: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// Two accounts, the second seeing the first's project folder through a
+    /// link: how someone hands a project's conversations to a work account.
+    fn shared_accounts(dir: &Path) -> (PathBuf, PathBuf) {
+        let own = dir.join(".claude");
+        let work = dir.join(".claude-work");
+        let project = own.join("projects").join("C--dev-app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(work.join("projects")).unwrap();
+        assert!(crate::adapters::link_dir(
+            &project,
+            &work.join("projects").join("C--dev-app")
+        ));
+        (own, work)
+    }
+
+    /// Claude Code's record of a process running `session` since `started`.
+    fn running(root: &Path, pid: u32, session: &str, started: DateTime<Utc>) {
+        let dir = root.join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{pid}.json")),
+            format!(
+                r#"{{"pid":{pid},"sessionId":"{session}","startedAt":{},"status":"busy"}}"#,
+                started.timestamp_millis()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn adapter_for(root: &Path, owners: &Arc<SessionOwners>) -> ClaudeAdapter {
+        let mut adapter = ClaudeAdapter::with_paths(
+            reqwest::Client::new(),
+            ClaudePaths {
+                root: root.to_path_buf(),
+            },
+        );
+        adapter.set_owners(Some(owners.clone()));
+        adapter
+    }
+
+    #[test]
+    fn who_ran_a_session_follows_it_from_account_to_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join(".claude");
+        let work = dir.path().join(".claude-work");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let start = at(NOW) - chrono::Duration::hours(3);
+        let minutes = |m: i64| start + chrono::Duration::minutes(m);
+        running(&own, 1, MINE, start);
+        running(&work, 2, MINE, minutes(60));
+        // An account that has run a session keeps a folder for it.
+        std::fs::create_dir_all(work.join("session-env").join(THEIRS)).unwrap();
+
+        let mut owners = SessionOwners::read(&[own.clone(), work.clone()]);
+        let (own, work) = (resolved(&own), resolved(&work));
+        assert_eq!(owners.owner_at(MINE, minutes(-1)), None);
+        assert_eq!(owners.owner_at(MINE, minutes(30)), Some(own.as_path()));
+        assert_eq!(owners.owner_at(MINE, minutes(90)), Some(work.as_path()));
+        assert_eq!(owners.owner_now(MINE), Some(work.as_path()));
+        assert_eq!(owners.owner_now(THEIRS), Some(work.as_path()));
+
+        // The hooks saw the first account pick it up again, twice over.
+        owners.observe(MINE, &own, minutes(150));
+        owners.observe(MINE, &own, minutes(160));
+        assert_eq!(owners.owner_now(MINE), Some(own.as_path()));
+        assert_eq!(owners.owner_at(MINE, minutes(140)), Some(work.as_path()));
+        assert_eq!(
+            owners.runs[MINE].len(),
+            3,
+            "the same account again is no change"
+        );
+
+        // Forgetting the old keeps what says who had it then.
+        owners.forget_before(minutes(145));
+        assert_eq!(owners.runs[MINE].len(), 2);
+        assert_eq!(owners.owner_at(MINE, minutes(146)), Some(work.as_path()));
+        assert_eq!(owners.owner_at(MINE, minutes(151)), Some(own.as_path()));
+        // A session not heard of since goes altogether.
+        owners.forget_before(minutes(200));
+        assert_eq!(owners.owner_now(MINE), None);
+    }
+
+    #[test]
+    fn a_shared_folder_s_conversations_are_each_the_account_s_that_runs_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (own, work) = shared_accounts(dir.path());
+        let project = own.join("projects").join("C--dev-app");
+        let reply = block("msg_a", "tool_use", 500);
+        let lines = [("user", -60, PROMPT), ("assistant", -50, reply.as_str())];
+        write_transcript(&project, &format!("{MINE}.jsonl"), &lines);
+        write_transcript(&project, &format!("{THEIRS}.jsonl"), &lines);
+        // The work account is running the second.
+        running(&work, 9, THEIRS, at(NOW) - chrono::Duration::seconds(70));
+
+        let owners = Arc::new(SessionOwners::read(&[own.clone(), work.clone()]));
+        let ids = |root: &Path| -> Vec<String> {
+            adapter_for(root, &owners)
+                .scan_sessions(at(NOW))
+                .into_iter()
+                .map(|session| session.id)
+                .collect()
+        };
+        assert_eq!(ids(&own), vec![MINE.to_string()]);
+        assert_eq!(ids(&work), vec![THEIRS.to_string()]);
+
+        // Without the other account to tell apart from, the linked folder is
+        // read like any other.
+        let alone =
+            ClaudeAdapter::with_paths(reqwest::Client::new(), ClaudePaths { root: work.clone() });
+        assert_eq!(alone.scan_sessions(at(NOW)).len(), 2);
+    }
+
+    #[test]
+    fn a_conversation_picked_up_by_the_other_account_is_each_one_s_in_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (own, work) = shared_accounts(dir.path());
+        let project = own.join("projects").join("C--dev-app");
+        let reply = block("msg_a", "tool_use", 500);
+        let lines = [("user", -60, PROMPT), ("assistant", -50, reply.as_str())];
+        write_transcript(&project, &format!("{MINE}.jsonl"), &lines);
+        write_transcript(&project, &format!("{THEIRS}.jsonl"), &lines);
+        let switch = at(NOW) - chrono::Duration::hours(1);
+        running(&own, 7, MINE, switch - chrono::Duration::hours(1));
+        running(&work, 9, MINE, switch);
+
+        let owners = Arc::new(SessionOwners::read(&[own.clone(), work.clone()]));
+        let (mine, theirs) = (adapter_for(&own, &owners), adapter_for(&work, &owners));
+        let before = switch - chrono::Duration::minutes(5);
+        let after = switch + chrono::Duration::minutes(5);
+
+        let here = project.join(format!("{MINE}.jsonl"));
+        assert!(mine.spends(&here)(before));
+        assert!(!mine.spends(&here)(after));
+        assert!(!theirs.spends(&here)(before));
+        assert!(theirs.spends(&here)(after));
+
+        // The same, reached through the link from the work account's folder.
+        let linked = work
+            .join("projects")
+            .join("C--dev-app")
+            .join(format!("{MINE}.jsonl"));
+        assert!(theirs.spends(&linked)(after));
+        assert!(!mine.spends(&linked)(after));
+
+        // Nothing says who ran the other conversation: it is the account's
+        // whose folder it is really in, by either road.
+        let other = work
+            .join("projects")
+            .join("C--dev-app")
+            .join(format!("{THEIRS}.jsonl"));
+        assert!(mine.spends(&other)(after));
+        assert!(!theirs.spends(&other)(after));
+    }
+
+    #[test]
+    fn accounts_sharing_conversations_are_told_from_ones_that_keep_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (own, work) = shared_accounts(dir.path());
+        assert!(shares_transcripts(&[own, work]));
+
+        let apart = tempfile::tempdir().unwrap();
+        let own = apart.path().join(".claude");
+        let work = apart.path().join(".claude-work");
+        std::fs::create_dir_all(own.join("projects").join("a")).unwrap();
+        std::fs::create_dir_all(work.join("projects").join("b")).unwrap();
+        assert!(!shares_transcripts(&[own, work]));
+    }
+
+    #[test]
+    fn a_subagent_s_transcript_is_part_of_the_session_that_started_it() {
+        let path = Path::new("projects")
+            .join("C--dev-app")
+            .join(MINE)
+            .join("subagents")
+            .join("agent-a0b1.jsonl");
+        assert_eq!(session_of(&path).as_deref(), Some(MINE));
+        assert_eq!(
+            session_of(&Path::new("p").join(format!("{THEIRS}.jsonl"))).as_deref(),
+            Some(THEIRS)
+        );
+        assert_eq!(session_of(Path::new("p/notes.jsonl")), None);
+    }
 
     #[test]
     fn parses_the_nested_credentials_envelope() {

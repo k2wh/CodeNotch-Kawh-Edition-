@@ -62,6 +62,12 @@ pub struct HookEvent {
     pub event: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// The folder the agent was pointed at instead of its default
+    /// (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), which is which account the event
+    /// is about. A hook runs inside the agent and sees what it sees; absent
+    /// means the default account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 
 impl HookEvent {
@@ -138,6 +144,11 @@ pub fn run_as_hook_if_asked() -> bool {
         return false;
     }
     let provider = args.next().unwrap_or_else(|| "claude".into());
+    let home_var = if provider == "codex" {
+        "CODEX_HOME"
+    } else {
+        "CLAUDE_CONFIG_DIR"
+    };
 
     let mut raw = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut raw);
@@ -158,6 +169,10 @@ pub fn run_as_hook_if_asked() -> bool {
             .or_else(|| json.get("sessionId"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        home: std::env::var(home_var)
+            .ok()
+            .map(|home| home.trim().to_string())
+            .filter(|home| !home.is_empty()),
     };
 
     let _ = append(&event);
